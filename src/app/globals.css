@@ -1,26 +1,62 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f4f6f8;  --foreground: #121a22;
+  --card: #ffffff;        --card-2: #eef1f5;
+  --muted: #eef1f5;       --muted-foreground: #4b5a67;  --faint: #748493;
+  --border: #d9e0e7;      --border-2: #c3ccd5;
+  --primary: #0f6580;     --primary-foreground: #ffffff;  --accent-soft: #e2eff3;
+  --ok: #2c7a51;   --ok-bg: #e2f1e9;
+  --warn: #9a6b12; --warn-bg: #f6ecd6;
+  --bad: #b23b3b;  --bad-bg: #f6e0e0;
+  --info: #33628f; --info-bg: #e2ebf4;
+  --brass: #a76a17;
+  --radius: 0.75rem;
+}
+.dark {
+  --background: #0d1319;  --foreground: #e6edf3;
+  --card: #141d25;        --card-2: #1a252f;
+  --muted: #1a252f;       --muted-foreground: #a4b2bd;  --faint: #72828f;
+  --border: #263540;      --border-2: #33454f;
+  --primary: #49b3d4;     --primary-foreground: #06222b;  --accent-soft: #123039;
+  --ok: #5cc189;   --ok-bg: #122a20;
+  --warn: #d3a94f; --warn-bg: #2c2410;
+  --bad: #e07070;  --bad-bg: #2e1616;
+  --info: #7bb0e0; --info-bg: #132131;
+  --brass: #d69f57;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-card: var(--card);
+  --color-card-2: var(--card-2);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-faint: var(--faint);
+  --color-border: var(--border);
+  --color-border-2: var(--border-2);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-accent-soft: var(--accent-soft);
+  --color-ok: var(--ok);     --color-ok-bg: var(--ok-bg);
+  --color-warn: var(--warn); --color-warn-bg: var(--warn-bg);
+  --color-bad: var(--bad);   --color-bad-bg: var(--bad-bg);
+  --color-info: var(--info); --color-info-bg: var(--info-bg);
+  --color-brass: var(--brass);
+  --radius-lg: var(--radius);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
+* { border-color: var(--border); }
+html { scroll-behavior: smooth; }
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
 }
+::selection { background: var(--accent-soft); }
+.tnum { font-variant-numeric: tabular-nums; }

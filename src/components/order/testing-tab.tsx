@@ -17,7 +17,7 @@ import { Select } from "@/components/ui/form";
 import { useStore } from "@/store/store";
 import { useRole } from "@/lib/role";
 import {
-  escrowRemaining, specForMpn, lotTestProgress, currentReport, lotEmails, unmatchedEmails,
+  specForMpn, lotTestProgress, currentReport, lotEmails, unmatchedEmails,
   testAutofillGaps, overdueUpdateRequests, reconciliationAlerts, testingSummary, lotResults, lotStageProgress,
 } from "@/store/selectors";
 import { qtyfmt, cn } from "@/lib/utils";
@@ -107,8 +107,8 @@ function Denied({ what }: { what: string }) {
 }
 
 export function TestingTab({
-  b, id, onAdd, onRelease, onRefund, onExtend,
-}: { b: OrderBundle; id: string; onAdd: () => void; onRelease: () => void; onRefund: () => void; onExtend: () => void }) {
+  b, id, onAdd,
+}: { b: OrderBundle; id: string; onAdd: () => void }) {
   const [sub, setSub] = useState<Sub>("lots");
   const [compose, setCompose] = useState<{ lotId?: string; templateId?: string } | null>(null);
   const [notify, setNotify] = useState<{ lotId: string; party: NotifyParty } | null>(null);
@@ -136,10 +136,7 @@ export function TestingTab({
   const overdue = overdueUpdateRequests(b).filter((o) => !lotId || o.lot.id === lotId);
   const alerts = reconciliationAlerts(b).filter((a) => !lotId || a.lotId === lotId);
   const unmatched = unmatchedEmails(b); // never lot-scoped — that's the point of the queue
-  const hasFail = b.lots.some((l) => l.testStatus === "FAIL");
   const hasPass = b.lots.some((l) => l.testStatus === "PASS");
-  const canRelease = !!b.escrow && escrowRemaining(b) > 0;
-  const pendingExt = b.escrow?.extensions?.some((x) => x.status === "REQUESTED");
   const testedPct = sum.tests ? Math.round((sum.passed / sum.tests) * 100) : 0;
 
   return (
@@ -335,20 +332,16 @@ export function TestingTab({
           </div>
         )}
 
-        {/* ---- escrow hooks kept exactly as before: a PASS releases, a FAIL refunds ---- */}
-        {hasPass && canRelease && (
+        {/* Release/refund itself lives on the Escrow tab (milestone-driven, per invoice terms) —
+            this just surfaces the signal so nobody has to go looking for it. */}
+        {hasPass && b.paymentMode === "ESCROW" && b.escrow && b.escrow.status !== "RELEASED_TO_SELLER" && (
           <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[color-mix(in_srgb,var(--ok)_40%,transparent)] bg-ok-bg p-2.5 text-sm">
-            <span className="text-ok">A lot PASSED — release the escrow tranche to the seller.</span>
-            <div className="flex gap-2">
-              {b.escrow && <Button variant="outline" onClick={onExtend} disabled={pendingExt}>{pendingExt ? "Extension pending…" : "Extend window"}</Button>}
-              <Button onClick={onRelease}>Release escrow</Button>
-            </div>
+            <span className="text-ok">A lot PASSED — this satisfies the escrow release condition. Head to the Escrow tab to release the relevant milestone.</span>
           </div>
         )}
         {b.paymentMode === "ESCROW" && (
           <p className="mt-3 text-xs text-muted-foreground">
-            A <b className="text-ok">PASS</b> releases the escrow tranche; a <b className="text-bad">FAIL</b> starts the return/refund path.
-            {hasFail && <> <button onClick={onRefund} className="text-primary hover:underline">Refund escrow →</button></>}
+            A <b className="text-ok">PASS</b> satisfies the escrow release condition (see the Escrow tab); on a <b className="text-bad">FAIL</b>, decide retest or return here — a client refund is instructed from the Escrow tab.
           </p>
         )}
       </Panel>
@@ -697,7 +690,7 @@ function NextActionsMenu({
               () => onNotify(lot.id, "SUPPLIER"), { disabled: !canEmail, done: sentTo("SUPPLIER")?.at })}
             {item("Notify buyer / client", "Result + report; supplier stays masked", <Users className="h-4 w-4" />,
               () => onNotify(lot.id, "BUYER"), { disabled: !canEmail, done: sentTo("BUYER")?.at })}
-            {item("Notify escrow provider", b.escrow ? `Release-trigger evidence to HKIN (${b.escrow.externalRef})` : "No escrow on this order", <Landmark className="h-4 w-4" />,
+            {item("Notify escrow provider", b.escrow ? `Release-trigger evidence to HKIN (${b.escrow.invoice?.invoiceNo ?? b.orderNo})` : "No escrow on this order", <Landmark className="h-4 w-4" />,
               () => onNotify(lot.id, "ESCROW"), { disabled: !canEmail || !b.escrow, done: sentTo("ESCROW")?.at })}
             {item("Acknowledge to WHL", "Confirm the report is received and logged", <FlaskConical className="h-4 w-4" />,
               () => onNotify(lot.id, "WHL"), { disabled: !canEmail, done: sentTo("WHL")?.at })}

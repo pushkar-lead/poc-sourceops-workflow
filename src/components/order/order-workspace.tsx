@@ -5,21 +5,22 @@ import { useState } from "react";
 import {
   ArrowLeft, Lock, Check, CircleDot, Circle, Ban, ChevronRight, Upload, Building2, Plus,
 } from "lucide-react";
-import type { OrderBundle, JourneyStep, ShipmentStatus, EscrowEvent } from "@/types";
+import type { OrderBundle, JourneyStep, ShipmentStatus } from "@/types";
 import { WORKSPACE_TABS, type WorkspaceTab } from "@/data/enums";
 import { Panel, Pill, StatusPill, Button, Progress, Field, DataTable, type Col } from "@/components/ui/primitives";
 import { Select } from "@/components/ui/form";
 import { money, qtyfmt, cn, fmtAddress } from "@/lib/utils";
 import { usd, toUSD } from "@/lib/fx";
 import { useStore } from "@/store/store";
-import { journeyPct, escrowReleased, escrowRemaining, remainingToShip, remainingToAllocate, customsApplies, gateReason, mappedForOrderLine, unmappedForOrderLine } from "@/store/selectors";
+import { journeyPct, remainingToShip, remainingToAllocate, customsApplies, gateReason, mappedForOrderLine, unmappedForOrderLine } from "@/store/selectors";
+import { EscrowTab } from "@/components/order/escrow-tab";
 import {
-  AddStepModal, AddLotModal, EscrowAmountModal, ExtendEscrowModal, AddPaymentModal, CreateShipmentModal,
+  AddStepModal, AddLotModal, UploadEscrowInvoiceModal, UploadPaymentClosureModal, AddPaymentModal, CreateShipmentModal,
   FileBOEModal, AllocateDeliveryModal, AddEventModal, UploadDocModal, AddAllocationModal, UploadPIModal,
 } from "@/components/order/modals";
 import { TestingTab } from "@/components/order/testing-tab";
 
-type ModalKey = null | "addStep" | "addLot" | "fund" | "release" | "refund" | "extend" | "addPayment" | "shipment" | "boe" | "allocate" | "event" | "doc" | "pi";
+type ModalKey = null | "addStep" | "addLot" | "escrowInvoice" | "paymentClosure" | "addPayment" | "shipment" | "boe" | "allocate" | "event" | "doc" | "pi";
 
 export function OrderWorkspace({ id }: { id: string }) {
   const b = useStore((s) => s.orders[id]);
@@ -90,7 +91,7 @@ export function OrderWorkspace({ id }: { id: string }) {
 
       <JourneyStepper b={b} />
 
-      <div className="flex gap-1.5 overflow-x-auto border-b">
+      <div className="no-scrollbar flex gap-1.5 overflow-x-auto border-b">
         {WORKSPACE_TABS.map((t) => (
           <button key={t} onClick={() => setTab(t)}
             className={cn("-mb-px whitespace-nowrap rounded-t-lg border-b-2 px-3 py-2 text-sm transition",
@@ -104,8 +105,16 @@ export function OrderWorkspace({ id }: { id: string }) {
       {tab === "Lines" && <LinesTab b={b} />}
       {tab === "Allocations" && <AllocationsTab b={b} onMap={setMapLine} />}
       {tab === "Journey" && <JourneyTab b={b} id={id} onAdd={() => setModal("addStep")} />}
-      {tab === "Testing" && <TestingTab b={b} id={id} onAdd={() => setModal("addLot")} onRelease={() => setModal("release")} onRefund={() => setModal("refund")} onExtend={() => setModal("extend")} />}
-      {tab === "Escrow" && <EscrowTab b={b} onFund={() => setModal("fund")} onRelease={() => setModal("release")} onRefund={() => setModal("refund")} onExtend={() => setModal("extend")} />}
+      {tab === "Testing" && <TestingTab b={b} id={id} onAdd={() => setModal("addLot")} />}
+      {tab === "Escrow" && (
+        <EscrowTab
+          b={b} id={id}
+          onUploadInvoice={() => setModal("escrowInvoice")}
+          onUploadPaymentClosure={() => setModal("paymentClosure")}
+          onUploadPI={() => setModal("pi")}
+          onUploadDoc={() => setModal("doc")}
+        />
+      )}
       {tab === "Payments" && <PaymentsTab b={b} id={id} onAdd={() => setModal("addPayment")} />}
       {tab === "Shipments" && <ShipmentsTab b={b} id={id} onAdd={() => setModal("shipment")} />}
       {tab === "Customs" && <CustomsTab b={b} onFile={() => setModal("boe")} />}
@@ -116,10 +125,8 @@ export function OrderWorkspace({ id }: { id: string }) {
 
       {modal === "addStep" && <AddStepModal orderId={id} onClose={close} />}
       {modal === "addLot" && <AddLotModal orderId={id} onClose={close} />}
-      {modal === "fund" && <EscrowAmountModal orderId={id} mode="fund" onClose={close} />}
-      {modal === "release" && <EscrowAmountModal orderId={id} mode="release" onClose={close} />}
-      {modal === "refund" && <EscrowAmountModal orderId={id} mode="refund" onClose={close} />}
-      {modal === "extend" && <ExtendEscrowModal orderId={id} onClose={close} />}
+      {modal === "escrowInvoice" && <UploadEscrowInvoiceModal orderId={id} onClose={close} />}
+      {modal === "paymentClosure" && <UploadPaymentClosureModal orderId={id} onClose={close} />}
       {modal === "addPayment" && <AddPaymentModal orderId={id} onClose={close} />}
       {modal === "shipment" && <CreateShipmentModal orderId={id} onClose={close} />}
       {modal === "boe" && <FileBOEModal orderId={id} onClose={close} />}
@@ -165,7 +172,7 @@ function JourneyStepper({ b }: { b: OrderBundle }) {
           <span className="inline-flex items-center gap-1 rounded-md bg-ok-bg px-2 py-0.5 text-xs font-medium text-ok"><Check className="h-3.5 w-3.5" /> Complete</span>
         )}
       </div>
-      <ol className="flex items-start gap-0 overflow-x-auto pb-1">
+      <ol className="no-scrollbar flex items-start gap-0 overflow-x-auto pb-1">
         {b.journey.map((s, i) => {
           const isCurrent = s.id === current?.id;
           const blocked = isCurrent && !!reason;
@@ -354,69 +361,6 @@ function JourneyTab({ b, id, onAdd }: { b: OrderBundle; id: string; onAdd: () =>
         })}
       </ol>
     </Panel>
-  );
-}
-
-function EscrowTab({ b, onFund, onRelease, onRefund, onExtend }: { b: OrderBundle; onFund: () => void; onRelease: () => void; onRefund: () => void; onExtend: () => void }) {
-  if (!b.escrow) {
-    return <Panel title="Escrow" actions={<Button variant="outline" onClick={onFund}><Plus className="h-4 w-4" /> Open escrow</Button>}>
-      <Empty text={`No escrow — supplier is paid via ${b.paymentMode}. (You can still open one.)`} /></Panel>;
-  }
-  const e = b.escrow;
-  const released = escrowReleased(b);
-  const remaining = escrowRemaining(b);
-  const isOpen = e.status === "OPEN";
-  const hasPass = b.lots.some((l) => l.testStatus === "PASS");
-  const pendingExt = e.extensions?.some((x) => x.status === "REQUESTED");
-  const releaseBlocked = isOpen ? "Fund the escrow first." : !hasPass ? "Needs a lab PASS first." : remaining <= 0 ? "Fully released." : null;
-  const cols: Col<EscrowEvent>[] = [
-    { key: "t", header: "Event", render: (x) => <StatusPill status={x.type} /> },
-    { key: "a", header: "Amount", align: "right", render: (x) => money(x.amount, e.currency) },
-    { key: "tr", header: "Trigger", render: (x) => <span className="text-sm text-muted-foreground">{x.trigger}</span> },
-    { key: "d", header: "When", align: "right", render: (x) => <span className="text-xs tnum">{x.occurredAt}</span> },
-  ];
-  return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-      <Panel title="Escrow account (3-party)" actions={<StatusPill status={e.status} />}>
-        <Field label="Provider">{e.provider}</Field>
-        <Field label="Reference">{e.externalRef}</Field>
-        {e.paymentTerms && <Field label="Payment terms">{e.paymentTerms}</Field>}
-        <Field label="Material (A1)">{money(e.materialAmount, e.currency)}</Field>
-        <Field label="Charges (A2)">{money(e.chargesAmount, e.currency)}</Field>
-        {!!e.bankingCharges && <Field label="Banking charges">{money(e.bankingCharges, e.currency)}</Field>}
-        <Field label="Super-invoice total">{money(e.superInvoiceTotal, e.currency)}</Field>
-        <Field label="Released / Remaining">{money(released, e.currency)} / {money(remaining, e.currency)}</Field>
-        <Field label="Release trigger">{e.releaseTrigger}</Field>
-        {e.expiryDate && <Field label="Window expiry">{e.expiryDate}</Field>}
-        <div className="mt-3 flex flex-wrap gap-2">
-          {isOpen && <Button onClick={onFund}><Plus className="h-4 w-4" /> Fund escrow</Button>}
-          <Button onClick={onRelease} disabled={!!releaseBlocked}>{remaining <= 0 && !isOpen ? "Fully released" : "Release tranche"}</Button>
-          {hasPass && !isOpen && <Button variant="outline" onClick={onExtend} disabled={pendingExt}>{pendingExt ? "Extension pending…" : "Extend window"}</Button>}
-          <Button variant="outline" onClick={onRefund}>Refund</Button>
-        </div>
-        {releaseBlocked && releaseBlocked !== "Fully released." && <p className="mt-2 text-xs text-muted-foreground">{isOpen ? "Escrow is open — fund the super-invoice to arm it." : "Release unlocks on a lab PASS (that's what escrow protects)."}</p>}
-        {!!b.termsConditions?.length && <p className="mt-2 text-xs text-muted-foreground">Release fulfilled per the agreed <b className="text-foreground">Terms &amp; Conditions</b> ({b.termsConditions.length} clause{b.termsConditions.length > 1 ? "s" : ""}) — see the order Overview.</p>}
-        {hasPass && !isOpen && <p className="mt-1 text-xs text-faint">Testing confirmed — you can request a window extension if release will run past expiry.</p>}
-      </Panel>
-      <div className="space-y-4">
-        <Panel title="Ledger"><DataTable columns={cols} rows={e.events} empty="No escrow events yet." /></Panel>
-        {!!e.extensions?.length && (
-          <Panel title="Window extensions">
-            <div className="space-y-2">
-              {e.extensions.map((x) => (
-                <div key={x.id} className="flex items-start justify-between gap-3 border-b pb-2 text-sm last:border-0 last:pb-0">
-                  <div>
-                    <div className="font-medium">→ {x.newDate}</div>
-                    <div className="text-xs text-muted-foreground">{x.reason} · requested {x.requestedAt}{x.respondedAt ? ` · responded ${x.respondedAt}` : ""}</div>
-                  </div>
-                  <StatusPill status={x.status} />
-                </div>
-              ))}
-            </div>
-          </Panel>
-        )}
-      </div>
-    </div>
   );
 }
 

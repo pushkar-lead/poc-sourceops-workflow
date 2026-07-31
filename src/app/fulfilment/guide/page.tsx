@@ -11,12 +11,12 @@ const PHASES: {
     { name: "Order received for fulfilment (already approved, PI in hand)", owner: "SC", cond: "PO review, sending the PO & supplier ACK+PI are done on the upstream sourcing platform — this console is fulfilment-only. Upload the confirmed PI to the order." },
   ] },
   { phase: "Payment", tone: "warn", steps: [
-    { name: "Fund escrow (super-invoice A1 + A2)", owner: "Finance", gate: "escrow must be FUNDED", cond: "when payment = Escrow / LC" },
+    { name: "Escrow: T/T payment received", owner: "Finance", gate: "escrow must reach T/T Payment Received", cond: "when payment = Escrow / LC" },
     { name: "Pay supplier (advance / credit)", owner: "Finance", gate: "supplier payment INITIATED / PAID", cond: "when payment = Advance / Credit" },
   ] },
   { phase: "Testing", tone: "info", steps: [
     { name: "Testing — WHL lab or supplier self-test", owner: "Lab / Supplier", gate: "at least one lot must PASS", cond: "when testing ≠ None" },
-    { name: "Release escrow (on PASS, or on acceptance if untested)", owner: "Finance", gate: "an escrow tranche must be released", cond: "when payment = Escrow (always)" },
+    { name: "Release escrow (to seller)", owner: "Finance", gate: "escrow must reach Released to Seller", cond: "when payment = Escrow (always)" },
   ] },
   { phase: "Import / Customs", tone: "info", steps: [
     { name: "Ship to India (inbound AWB)", owner: "SC", gate: "an inbound shipment must exist", cond: "when international / A19" },
@@ -35,7 +35,7 @@ const PHASES: {
 ];
 
 const BRANCHES = [
-  { when: "Payment = Escrow / LC", then: "An escrow track appears — fund → hold → release. A gate holds the seller's money until quality is proven." },
+  { when: "Payment = Escrow / LC", then: "An escrow order appears on its own 8-state track (Draft → … → Released to Seller). A gate holds the seller's money until T/T payment is received and, later, release." },
   { when: "Payment = Advance / Credit", then: "No escrow. Supplier paid directly (up front, or on net-credit terms later). Gate = payment initiated." },
   { when: "Testing = None", then: "Testing and its gate are skipped entirely; the order goes straight from payment to logistics." },
   { when: "Testing = Sample / WHL", then: "A testing gate is inserted — nothing dispatches until a lot PASSES." },
@@ -46,15 +46,15 @@ const BRANCHES = [
 ];
 
 const OUTCOMES = [
-  { r: "PASS", tone: "ok" as const, icon: Check, text: "Quality proven → release the escrow tranche, then ship in." },
-  { r: "FAIL", tone: "bad" as const, icon: X, text: "Material reject → supplier takes it back → escrow refunded to the buyer." },
+  { r: "PASS", tone: "ok" as const, icon: Check, text: "Quality proven → ship in (escrow release runs on its own state machine — see the Escrow tab)." },
+  { r: "FAIL", tone: "bad" as const, icon: X, text: "Material reject → supplier takes it back." },
   { r: "MAYBE", tone: "warn" as const, icon: HelpCircle, text: "Edge case → reported to the client; client approves (continue) or rejects (return)." },
 ];
 
 // Worked end-to-end flows (🔒 = gate). Mirrors seedSteps ordering for the three common shapes.
 const SCENARIOS: { title: string; when: string; steps: { name: string; gate?: boolean }[] }[] = [
   { title: "International · Escrow · WHL lab", when: "payment = Escrow · testing = WHL · route = International", steps: [
-    { name: "Order received" }, { name: "Fund escrow", gate: true }, { name: "WHL test → PASS", gate: true },
+    { name: "Order received" }, { name: "Escrow: T/T received", gate: true }, { name: "WHL test → PASS", gate: true },
     { name: "Release escrow", gate: true }, { name: "Ship to India", gate: true }, { name: "BOE in ICEGATE", gate: true },
     { name: "Relabel to 1Buy" }, { name: "e-Invoice + dispatch", gate: true }, { name: "Proof of delivery" }, { name: "Close" },
   ] },
@@ -72,9 +72,9 @@ const SCENARIOS: { title: string; when: string; steps: { name: string; gate?: bo
 
 const ROLES = [
   { role: "SC (supply chain)", does: "Creates client & supplier POs, spins up the order from a supplier PO, drives the journey, records shipments, relabel, delivery & PoD." },
-  { role: "Finance", does: "Funds / releases / refunds escrow, runs both-sided payments, sits on release gates." },
+  { role: "Finance", does: "Advances each escrow order through its invoice/confirmation states, acknowledges terms, runs both-sided payments, sits on release gates." },
   { role: "Approver (upstream)", does: "PO review & approval happen on the sourcing platform — orders arrive in this console already approved, with the PI in hand." },
-  { role: "Lab (WHL)", does: "Runs testing; the PASS/FAIL/MAYBE result drives the escrow-release gate." },
+  { role: "Lab (WHL)", does: "Runs testing; the PASS/FAIL/MAYBE result drives the TESTING journey gate." },
   { role: "CHA", does: "Customs broker — files the BOE in ICEGATE (closes the import/FEMA loop)." },
   { role: "Supplier", does: "Sends ACK + PI, ships the goods (to lab, then to us)." },
 ];
@@ -84,7 +84,7 @@ const STORY = [
   { n: 2, icon: "🏭", title: "We buy from a supplier", plain: "We place our own order with a supplier who has the parts — neither side deals with the other, we sit in the middle.", term: "Our PO → Seller PI" },
   { n: 3, icon: "🔒", title: "The money is held safely", plain: "The buyer's payment goes into escrow — a neutral holding account — so nobody loses out if something goes wrong.", term: "Escrow" },
   { n: 4, icon: "🧪", title: "The parts are quality-checked", plain: "An independent lab tests a sample to confirm the parts are genuine and good.", term: "WHL testing" },
-  { n: 5, icon: "💸", title: "If they pass, the supplier is paid", plain: "A PASS releases the held money to the supplier. A FAIL means it's refunded and the goods go back.", term: "Release on PASS" },
+  { n: 5, icon: "💸", title: "The supplier is paid once goods are accepted", plain: "The escrow order works through its own state machine — sent for confirmation, invoiced, T/T received, inspected — before the held money is released to the supplier.", term: "Released to Seller" },
   { n: 6, icon: "🚢", title: "Goods travel & clear customs", plain: "The supplier ships to us; for imports the goods clear customs (duty + paperwork).", term: "Shipment + BOE" },
   { n: 7, icon: "🏷️", title: "We receive & relabel", plain: "Parts arrive at our warehouse; we check them and relabel them under 1Buy before sending on.", term: "GRN + relabel" },
   { n: 8, icon: "📦", title: "We deliver to the customer", plain: "We ship to the client with our invoice, capture proof of delivery, and close the deal.", term: "Dispatch + PoD" },

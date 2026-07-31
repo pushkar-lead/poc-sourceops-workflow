@@ -13,7 +13,7 @@ export const toneClass: Record<Tone, string> = {
 
 const OK = [
   "DONE", "PASS", "PAID", "RELEASE", "RELEASED", "DELIVERED", "APPROVED", "CLOSED", "ARRIVED", "CONFIRMED",
-  "PASSED", "ACCEPTABLE", "REPORT_DELIVERED", "OK",
+  "PASSED", "ACCEPTABLE", "REPORT_DELIVERED", "OK", "RELEASED_TO_SELLER",
 ];
 const BAD = [
   "FAIL", "REJECTED", "CANCELLED", "BLOCKED", "ON_HOLD", "REFUND", "REFUNDED", "DECLINED",
@@ -23,8 +23,12 @@ const WARN = [
   "PENDING", "PENDING_APPROVAL", "MAYBE", "AT_CUSTOMS", "FUND", "FUNDED", "HOLD", "PLANNED",
   "OPEN", "PARTIALLY_RELEASED", "INITIATED", "SKIPPED", "REQUESTED",
   "FAR", "AWAITING_RESPONSE",
+  "SENT_FOR_SELLER_CONFIRMATION", "SELLER_CONFIRMED", "ESCROW_FEE_INVOICED",
 ];
-const ACTIVE = ["ACTIVE", "IN_TRANSIT", "DISPATCHED", "IN_PROGRESS", "IN_FULFILMENT", "UPDATE_RECEIVED"];
+const ACTIVE = [
+  "ACTIVE", "IN_TRANSIT", "DISPATCHED", "IN_PROGRESS", "IN_FULFILMENT", "UPDATE_RECEIVED",
+  "TT_PAYMENT_RECEIVED", "GOODS_SHIPPED", "RECIPIENT_INSPECTION",
+];
 
 export function statusTone(s?: string): Tone {
   if (!s) return "neutral";
@@ -505,3 +509,9 @@ export const WORKSPACE_TABS = [
   "Shipments", "Customs", "Delivery", "Documents", "Events", "Approvals",
 ] as const;
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
+
+// Strict linear progression, Draft → Released to Seller (no backward moves, no branching — see Escrow spec §3).
+export const ESCROW_STATUS_ORDER = [
+  "DRAFT", "SENT_FOR_SELLER_CONFIRMATION", "SELLER_CONFIRMED", "ESCROW_FEE_INVOICED",
+  "TT_PAYMENT_RECEIVED", "GOODS_SHIPPED", "RECIPIENT_INSPECTION", "RELEASED_TO_SELLER",
+] as const;

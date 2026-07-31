@@ -38,9 +38,10 @@ export type ShipmentStatus =
 export type JourneyStatus = "PENDING" | "IN_PROGRESS" | "DONE" | "SKIPPED" | "BLOCKED";
 export type JourneyPhase =
   | "KICKOFF" | "PAYMENT" | "TESTING" | "EXPORT" | "IMPORT" | "CUSTOMS" | "RELABEL" | "DELIVERY" | "CLOSE";
-export type EscrowStatus =
-  | "OPEN" | "FUNDED" | "PARTIALLY_RELEASED" | "RELEASED" | "REFUNDED" | "CLOSED";
-export type EscrowEventType = "FUND" | "HOLD" | "RELEASE" | "REFUND";
+export type EscrowOrderStatus =
+  | "DRAFT" | "SENT_FOR_SELLER_CONFIRMATION" | "SELLER_CONFIRMED"
+  | "ESCROW_FEE_INVOICED" | "TT_PAYMENT_RECEIVED" | "GOODS_SHIPPED"
+  | "RECIPIENT_INSPECTION" | "RELEASED_TO_SELLER";
 export type PaymentDirection = "CLIENT_TO_1BUY" | "1BUY_TO_SUPPLIER";
 export type PaymentStatus = "PENDING" | "INITIATED" | "PAID" | "REFUNDED" | "CANCELLED";
 export type ApprovalState = "PENDING" | "APPROVED" | "REJECTED" | "SKIPPED";
@@ -369,41 +370,147 @@ export interface JourneyStep {
   isGate: boolean;
 }
 
-export interface EscrowEvent {
-  id: string;
-  type: EscrowEventType;
-  amount: number;
-  trigger: string;
-  occurredAt: string;
+// Recipient — the independent test lab goods ship to; a distinct party from Buyer/Seller.
+// Shared contact-card shape — used for Buyer, Seller, AND Recipient (each a distinct party on the escrow order).
+export interface EscrowContact {
+  company: string;
+  registeredAddress: string;
+  country: string;
+  contactPerson: string;
+  email: string;
+  phone: string;
+  im: string; // instant messaging, e.g. "WeChat: mtl_chen"
 }
 
-export interface EscrowExtension {
+// Fee line items exactly as printed on the escrow provider's invoice (§5a).
+export interface EscrowFeeBreakdown {
+  poTotal: number;
+  feeToBuyer: number;        // escrow fee to buyer (non-refundable)
+  wiringFeeToBuyer: number;  // T/T fee to buyer
+  feeToSeller: number;       // escrow fee to seller (non-refundable)
+  wiringFeeToSeller: number; // T/T fee to seller
+}
+
+// A payment-release milestone as printed on the invoice — e.g. "30% on shipment to WHL", "70% on
+// WHL PASS report". SC reads these off the invoice; they're not invented by this app.
+export interface ReleaseMilestone {
+  percent: number;
+  trigger: string;
+}
+
+// Escrow Conditions table printed on the same invoice (§5b).
+export interface EscrowConditions {
+  forwarder: string;           // "Which forwarder will be used?"
+  forwarderAccountNo?: string;
+  shipWithinDays: string;      // "within how many business days should seller ship after funds are received?"
+  inspectionPeriod: string;
+  feeSharingLabel: string;     // e.g. "100% Buyer / 0% Seller"
+  returnCondition: string;
+  releaseMilestones: ReleaseMilestone[];
+}
+
+// Wire instructions printed on the invoice — provider's own bank account, not order-specific.
+export interface EscrowBankAccount {
+  bankName: string;
+  bankAddress: string;
+  beneficiaryName: string;
+  accountNumber: string;
+  swiftCode: string;
+}
+
+export interface EscrowInvoice {
+  invoiceNo: string;
+  fees: EscrowFeeBreakdown;
+  conditions: EscrowConditions;
+  bankAccount: EscrowBankAccount;
+  receivedAt: string;
+}
+
+export type EmailDirection = "SENT" | "RECEIVED";
+export type WhlVerdict = "PASS" | "FAIL";
+
+// One item in the Escrow Agent's simulated inbox — an action library of emails SC can send/receive
+// at any time (goods can go seller → WHL → buyer, or seller → WHL → seller on FAIL, then re-test).
+// SENT emails always go through a compose/review step before they're logged here — nothing here
+// was dispatched by a single click without a human seeing the draft first.
+export interface EscrowAgentEmail {
   id: string;
-  reason: string;
-  newDate: string;
-  status: "REQUESTED" | "APPROVED" | "DECLINED";
-  requestedAt: string;
-  respondedAt?: string;
+  direction: EmailDirection;
+  subject: string;
+  from: string;
+  to?: string; // mainly for SENT emails
+  snippet: string;
+  receivedAt: string; // "occurred at" — applies to both directions
+  attachmentFileName?: string;
+}
+
+// Final settlement receipt once funds reach the seller.
+export interface EscrowPaymentClosure {
+  documentNo: string;
+  releasedAmount: number;
+  receivedAt: string;
+}
+
+// Tracks the send/confirm lifecycle of ONE release milestone from the invoice's releaseMilestones
+// list — a multi-tranche invoice (e.g. 20% on shipment / 50% on WHL PASS / 30% on receipt) needs
+// each tranche released independently as its own trigger is met, not one lump-sum release at the end.
+export interface MilestoneRelease {
+  index: number;        // position in invoice.conditions.releaseMilestones
+  instructedAt: string; // SC → HKin: "release this tranche"
+  confirmedAt?: string; // HKin confirms this tranche was released
 }
 
 export interface Escrow {
   id: string;
-  provider: string;
-  externalRef: string;
+  status: EscrowOrderStatus;
+  buyerContact: EscrowContact;   // masking entity — mirrors Order.maskingEntity
+  sellerContact: EscrowContact;  // real supplier — mirrors Order.supplier
+  poAmount: number;
   currency: string;
-  materialAmount: number; // A1
-  chargesAmount: number;  // A2
-  bankingCharges?: number; // wire / FX / provider banking charges
-  feeSeller: number;
-  feeBuyer: number;
-  superInvoiceTotal: number;
-  releaseTrigger: string;
-  paymentTerms?: string;   // e.g. "Advance via T/T into escrow"
-  expiryDate?: string;     // escrow window expiry (extendable)
-  extensions?: EscrowExtension[];
-  status: EscrowStatus;
-  events: EscrowEvent[];
+  useInspectionService: boolean; // "Escrow/i" — HKin's enhanced-inspection tier
+  recipient: EscrowContact;
+  agreedFeeToBuyer: number; // fee agreed with the provider when the supplier PO was drafted (§7 reconciliation baseline)
+  // Full payment-condition profile agreed at PO-drafting time — exists from Draft onward, same as
+  // agreedFeeToBuyer above. When the invoice actually arrives, its conditions should match this
+  // (that's the whole point of "agreed at PO time") — the Escrow Agent fetch uses this, not a
+  // one-size-fits-all default, so different orders can genuinely have different terms.
+  agreedConditions?: EscrowConditions;
+  invoice?: EscrowInvoice;
+  paymentClosure?: EscrowPaymentClosure;
+
+  // Payment communications — SC reviews the invoice, instructs Finance, Finance pays, HKin confirms.
+  paymentInstructedAt?: string; // SC → Finance: "pay it like this"
+  financeConfirmedAt?: string;  // Finance → SC: payment made, with a UTR to quote to HKin
+  financeUtr?: string;
+  paymentSentToHkinAt?: string; // SC → HKin: "we've made the payment, here's the UTR"
+
+  // WHL booking, test execution, and the retest/return decision all live on the Testing tab, not
+  // here — escrow only needs the one verdict signal (since that's what governs the release
+  // milestone) and, on FAIL, whether the client asks for a refund instead of waiting on a retest.
+  whlGoodsReceivedAt?: string; // WHL confirms physical receipt (or the hub, if no testing was agreed)
+  whlVerdict?: WhlVerdict;
+  whlVerdictAt?: string;
+  whlReportRef?: string;       // the detailed test report WHL sends alongside the verdict
+  refundRequestedAt?: string;  // client → SC: asked for a refund instead of a retest
+  refundInstructedAt?: string; // SC → HKin & supplier: initiate the refund
+
+  milestoneReleases: MilestoneRelease[]; // one entry per instructed tranche — see MilestoneRelease
+
+  agentEmails: EscrowAgentEmail[];
+  cancelledAt?: string; // buyer/seller can cancel before funds move (real product has this; only allowed pre T/T-received)
 }
+
+// Every outbound email goes through ComposeEmailModal — SC can edit the draft before it's sent.
+export type EscrowSendPurpose =
+  | "ORDER_TO_SELLER" | "PAYMENT_INSTRUCTION_TO_FINANCE" | "PAYMENT_CONFIRMATION_TO_HKIN"
+  | "REFUND_INSTRUCTION" | "RELEASE_FUNDS_INSTRUCTION";
+
+// Inbound emails — internal to the store's checkEscrowInbox "agent"; never picked by the UI
+// directly (see checkEscrowInbox in store.ts). Milestone release confirmations are handled
+// separately (by index into releaseMilestones), not through this fixed purpose list.
+export type EscrowReceivePurpose =
+  | "FINANCE_PAYMENT_CONFIRMATION" | "HKIN_PAYMENT_CONFIRMATION" | "SUPPLIER_SHIPMENT_NOTICE"
+  | "WHL_GOODS_RECEIVED" | "HUB_GOODS_RECEIVED" | "WHL_PROGRESS_UPDATE" | "CLIENT_REFUND_REQUEST";
 
 export interface Payment {
   id: string;

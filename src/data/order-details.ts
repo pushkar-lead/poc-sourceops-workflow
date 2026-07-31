@@ -14,7 +14,7 @@
  * The hero (ord-148) keeps its own richer seed in fixtures.ts; the rest live here.
  */
 import type {
-  OrderLine, Lot, LotTest, MpnTestSpec, WhlReport, LabEmail, Escrow, EscrowEvent, Payment, Shipment,
+  OrderLine, Lot, LotTest, MpnTestSpec, WhlReport, LabEmail, Payment, Shipment,
   CustomsEntry, DeliveryAllocation, SourcingAllocation, DocumentRef, Approval, OrderEvent, EInvoice,
   TestProcessStatus, TestSource, WhlProcessResult, WhlConclusion, TestAuditEntry, Address,
   LotNotification, NotifyParty,
@@ -163,7 +163,8 @@ export interface OrderDetail {
   mpnTests: MpnTestSpec[];
   lots: Lot[];
   labEmails: LabEmail[];
-  escrow?: Partial<Escrow> & { events?: EscrowEvent[] };
+  // Escrow itself is built entirely in fixtures.ts (8-state machine, milestone-based release,
+  // agreedConditions) — not seeded per-order here, so there's no escrow field on this shape.
   payments: Payment[];
   shipments: Shipment[];
   customs: CustomsEntry[];
@@ -486,13 +487,6 @@ const D153: OrderDetail = {
       "Documentation accepted for LOT-KS-2; general inspection underway. Note our X-Ray bench is under maintenance this week — advise whether to hold or descope.",
       { lot: LOT153_B }),
   ],
-  escrow: {
-    status: "FUNDED",
-    events: [
-      { id: nid("ee"), type: "FUND", amount: 58900, trigger: "Buyer funded super-invoice (material A1 held)", occurredAt: "2026-07-18" },
-      { id: nid("ee"), type: "HOLD", amount: 58900, trigger: "Awaiting WHL results (WO 352158 / 352159)", occurredAt: "2026-07-19" },
-    ],
-  },
   payments: [
     pay("CLIENT_TO_1BUY", "ESCROW", 67200, "USD", "PAID", "Our PI", { due: "2026-07-17", paid: "2026-07-17", utr: "UTR9911207" }),
     pay("1BUY_TO_SUPPLIER", "ESCROW", 58900, "USD", "PENDING", "Supplier PI", { due: "2026-08-05" }),
@@ -631,15 +625,6 @@ const D144: OrderDetail = {
       "Hi WHL team,\n\nReference:\n· MPN: STM32F407VGT6 (date code 2318)\n· Lot: LOT-J1 — qty 1000, sample 32\n· Work order: 351902\n· Client PO: ACME-PO-3210\n\nCould you confirm the report date? The shipment is booked for the 26th.\n\nThanks,\nSourcing Ops\nSharpbuy Global Solutions",
       { lot: LOT144_A }),
   ],
-  escrow: {
-    status: "RELEASED", externalRef: "ES2606-4417", expiryDate: "2026-07-20",
-    events: [
-      { id: nid("ee"), type: "FUND", amount: 27500, trigger: "Buyer funded super-invoice (material A1 held)", occurredAt: "2026-06-14" },
-      { id: nid("ee"), type: "HOLD", amount: 27500, trigger: "Awaiting WHL results", occurredAt: "2026-06-14" },
-      { id: nid("ee"), type: "RELEASE", amount: 21500, trigger: "LOT-J1 WHL PASS (report 351902.1)", occurredAt: "2026-06-25" },
-      { id: nid("ee"), type: "RELEASE", amount: 6000, trigger: "LOT-J2 WHL PASS (report 351903.1)", occurredAt: "2026-06-25" },
-    ],
-  },
   payments: [
     pay("CLIENT_TO_1BUY", "ESCROW", 31600, "USD", "PAID", "Our PI", { due: "2026-06-12", paid: "2026-06-12", utr: "UTR7710021" }),
     pay("1BUY_TO_SUPPLIER", "ESCROW", 27500, "USD", "PAID", "Supplier PI", { due: "2026-06-25", paid: "2026-06-25", utr: "UTR7719987" }),

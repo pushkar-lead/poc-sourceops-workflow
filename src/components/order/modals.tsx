@@ -6,7 +6,7 @@ import { Dialog } from "@/components/ui/dialog";
 import { Labeled, Input, Select, Textarea } from "@/components/ui/form";
 import { Button } from "@/components/ui/primitives";
 import { useStore } from "@/store/store";
-import { remainingToShipLeg, remainingToAllocate, sourcedForClientLine, orderSourcedForClient, deliveredForClientLine, escrowRemaining } from "@/store/selectors";
+import { remainingToShipLeg, remainingToAllocate, sourcedForClientLine, orderSourcedForClient, deliveredForClientLine } from "@/store/selectors";
 import { computeDuty } from "@/lib/fx";
 import { money, fmtAddress } from "@/lib/utils";
 import { WHL_CONTACT, WHL_EMAIL_TEMPLATES, whlTemplate, notifyTemplate, notifyDigest, type WhlMailCtx, type NotifyCtx } from "@/data/enums";
@@ -226,8 +226,8 @@ export function NotifyLotResultModal({
       lotCode: lot?.lotCode ?? "—", qty: lot?.qty ?? 0, sampleQty: lot?.sampleQty, dateCode: lot?.dateCode,
       reportNo: rep?.reportNo, reportDate: rep?.reportDate, workOrderNo: lot?.workOrderNo,
       conclusion: rep?.conclusion, anyFar: rep?.anyFar, clientPoNo: lot?.clientPoNo,
-      supplierPoNo: b?.supplierPoNo, escrowRef: b?.escrow?.externalRef,
-      releasable: b ? escrowRemaining(b) : undefined, currency: b?.currency, lab: lot?.lab,
+      supplierPoNo: b?.supplierPoNo, escrowRef: b?.escrow?.invoice?.invoiceNo ?? b?.orderNo,
+      releasable: b?.escrow?.poAmount, currency: b?.currency, lab: lot?.lab,
     };
   };
 
@@ -300,7 +300,7 @@ export function BulkNotifyModal({
   const digestFor = (grp: { key: string; lots: typeof lots }) => notifyDigest(party, {
     entity: b?.maskingEntity ?? "1Buy", orderNo: b?.orderNo ?? "—",
     supplierPoNo: b?.supplierPoNo, clientPoNo: party === "BUYER" && grp.key !== "ALL" ? grp.key : undefined,
-    escrowRef: b?.escrow?.externalRef, currency: b?.currency, releasable: b ? escrowRemaining(b) : undefined,
+    escrowRef: b?.escrow?.invoice?.invoiceNo ?? b?.orderNo, currency: b?.currency, releasable: b?.escrow?.poAmount,
     lots: grp.lots.map((l) => {
       const r = repOf(l);
       return { mpn: l.orderLineMpn, lotCode: l.lotCode, qty: l.qty, sampleQty: l.sampleQty, dateCode: l.dateCode,
@@ -430,52 +430,83 @@ export function MatchLabEmailModal({ orderId, email, onClose }: { orderId: strin
   );
 }
 
-export function EscrowAmountModal({ orderId, mode, onClose }: { orderId: string; mode: "fund" | "release" | "refund"; onClose: () => void }) {
+export function UploadEscrowInvoiceModal({ orderId, onClose }: { orderId: string; onClose: () => void }) {
   const b = useStore((s) => s.orders[orderId]);
-  const fundEscrow = useStore((s) => s.fundEscrow);
-  const releaseEscrow = useStore((s) => s.releaseEscrow);
-  const refundEscrow = useStore((s) => s.refundEscrow);
-  const [amount, setAmount] = useState(mode === "fund" ? (b?.buyTotal ?? 0) : 0);
-  const [charges, setCharges] = useState(b?.escrow?.chargesAmount ?? Math.round((b?.buyTotal ?? 0) * 0.02));
-  const [banking, setBanking] = useState(b?.escrow?.bankingCharges ?? Math.round((b?.buyTotal ?? 0) * 0.005));
-  if (!b) return null;
-  const title = mode === "fund" ? "Fund escrow (super-invoice)" : mode === "release" ? "Release escrow tranche" : "Refund escrow";
+  const uploadEscrowInvoiceManually = useStore((s) => s.uploadEscrowInvoiceManually);
+  const [invoiceNo, setInvoiceNo] = useState("");
+  const [feeToBuyer, setFeeToBuyer] = useState(60);
+  const [wiringFeeToBuyer, setWiringFeeToBuyer] = useState(40);
+  const [feeToSeller, setFeeToSeller] = useState(0);
+  const [wiringFeeToSeller, setWiringFeeToSeller] = useState(0);
+  const [inspectionPeriod, setInspectionPeriod] = useState("5 business days");
+  const [shipWithinDays, setShipWithinDays] = useState("7 business days");
+  const [forwarder, setForwarder] = useState("DHL");
+  const [forwarderAccountNo, setForwarderAccountNo] = useState("");
+  const [feeSharingLabel, setFeeSharingLabel] = useState("100% Buyer / 0% Seller");
+  const [returnCondition, setReturnCondition] = useState("7 business days, shipping fees to Seller");
+  const [milestone1Pct, setMilestone1Pct] = useState(30);
+  const [milestone1Trigger, setMilestone1Trigger] = useState("On shipment to WHL for testing");
+  const [milestone2Pct, setMilestone2Pct] = useState(70);
+  const [milestone2Trigger, setMilestone2Trigger] = useState("On WHL PASS report");
+  if (!b || !b.escrow) return null;
   const save = () => {
-    if (mode === "fund") fundEscrow(orderId, { provider: "HKIN", material: amount, charges, bankingCharges: banking });
-    else if (mode === "release") releaseEscrow(orderId, amount, b.escrow?.releaseTrigger ?? "Manual release (lab PASS)");
-    else refundEscrow(orderId, amount, "Refund on FAIL");
+    if (!invoiceNo.trim()) return;
+    uploadEscrowInvoiceManually(orderId, {
+      invoiceNo: invoiceNo.trim(),
+      fees: { poTotal: b.escrow!.poAmount, feeToBuyer, wiringFeeToBuyer, feeToSeller, wiringFeeToSeller },
+      conditions: {
+        forwarder, forwarderAccountNo: forwarderAccountNo.trim() || undefined, shipWithinDays, inspectionPeriod, feeSharingLabel, returnCondition,
+        releaseMilestones: [{ percent: milestone1Pct, trigger: milestone1Trigger }, { percent: milestone2Pct, trigger: milestone2Trigger }].filter((m) => m.percent > 0),
+      },
+    });
     onClose();
   };
-  const siPreview = amount + charges + banking + 450;
   return (
-    <Dialog open onClose={onClose} title={title} footer={<Footer onClose={onClose} onSave={save} saveLabel={title.split(" ")[0]} disabled={amount <= 0} />}>
+    <Dialog open onClose={onClose} title="Upload escrow invoice manually" footer={<Footer onClose={onClose} onSave={save} saveLabel="Attach invoice" disabled={!invoiceNo.trim()} />}>
       <div className="space-y-3">
-        <Labeled label={mode === "fund" ? "Material amount (A1)" : "Amount"}><Input type="number" value={amount} onChange={(e) => setAmount(+e.target.value)} /></Labeled>
-        {mode === "fund" && <>
-          <Labeled label="Escrow charges (A2)"><Input type="number" value={charges} onChange={(e) => setCharges(+e.target.value)} /></Labeled>
-          <Labeled label="Banking charges (wire / FX)"><Input type="number" value={banking} onChange={(e) => setBanking(+e.target.value)} /></Labeled>
-          <p className="text-xs text-muted-foreground">{b.currency} · super-invoice = A1 + A2 + banking + fees ≈ <b className="text-foreground tnum">{money(siPreview, b.currency)}</b>. Only A1 is releasable to the supplier.</p>
-        </>}
-        {mode === "release" && b.escrow && <p className="text-xs text-muted-foreground">Release trigger: <b className="text-foreground">{b.escrow.releaseTrigger}</b>{b.termsConditions?.length ? " — fulfilled per the agreed T&Cs." : "."}</p>}
-        {mode === "refund" && <p className="text-xs text-muted-foreground">{b.currency} · refunds return held funds to the buyer.</p>}
+        <div className="rounded-lg bg-muted p-2.5 text-xs text-muted-foreground">Fallback for when the Escrow Agent misses the provider&apos;s email. PO total is fixed from this order: <b className="text-foreground tnum">{money(b.escrow.poAmount, b.escrow.currency)}</b>. Wire instructions use the provider&apos;s standing demo bank account.</div>
+        <Labeled label="Invoice no."><Input value={invoiceNo} onChange={(e) => setInvoiceNo(e.target.value)} placeholder="AE2607-1188" /></Labeled>
+        <div className="grid grid-cols-2 gap-3">
+          <Labeled label="Escrow fee to buyer"><Input type="number" value={feeToBuyer} onChange={(e) => setFeeToBuyer(+e.target.value)} /></Labeled>
+          <Labeled label="Wiring fee to buyer"><Input type="number" value={wiringFeeToBuyer} onChange={(e) => setWiringFeeToBuyer(+e.target.value)} /></Labeled>
+          <Labeled label="Escrow fee to seller"><Input type="number" value={feeToSeller} onChange={(e) => setFeeToSeller(+e.target.value)} /></Labeled>
+          <Labeled label="Wiring fee to seller"><Input type="number" value={wiringFeeToSeller} onChange={(e) => setWiringFeeToSeller(+e.target.value)} /></Labeled>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Labeled label="Forwarder"><Input value={forwarder} onChange={(e) => setForwarder(e.target.value)} /></Labeled>
+          <Labeled label="Forwarder account no." hint="optional"><Input value={forwarderAccountNo} onChange={(e) => setForwarderAccountNo(e.target.value)} /></Labeled>
+          <Labeled label="Ship within (of funds received)"><Input value={shipWithinDays} onChange={(e) => setShipWithinDays(e.target.value)} /></Labeled>
+          <Labeled label="Inspection period"><Input value={inspectionPeriod} onChange={(e) => setInspectionPeriod(e.target.value)} /></Labeled>
+          <Labeled label="Fee sharing"><Input value={feeSharingLabel} onChange={(e) => setFeeSharingLabel(e.target.value)} /></Labeled>
+        </div>
+        <Labeled label="Return condition"><Input value={returnCondition} onChange={(e) => setReturnCondition(e.target.value)} /></Labeled>
+        <div className="rounded-lg border p-2.5">
+          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Payment-release milestones (as printed on the invoice)</div>
+          <div className="grid grid-cols-[64px_1fr] gap-2">
+            <Input type="number" value={milestone1Pct} onChange={(e) => setMilestone1Pct(+e.target.value)} />
+            <Input value={milestone1Trigger} onChange={(e) => setMilestone1Trigger(e.target.value)} placeholder="Trigger, e.g. on shipment" />
+            <Input type="number" value={milestone2Pct} onChange={(e) => setMilestone2Pct(+e.target.value)} />
+            <Input value={milestone2Trigger} onChange={(e) => setMilestone2Trigger(e.target.value)} placeholder="Trigger, e.g. on PASS report" />
+          </div>
+        </div>
       </div>
     </Dialog>
   );
 }
 
-export function ExtendEscrowModal({ orderId, onClose }: { orderId: string; onClose: () => void }) {
+export function UploadPaymentClosureModal({ orderId, onClose }: { orderId: string; onClose: () => void }) {
   const b = useStore((s) => s.orders[orderId]);
-  const requestEscrowExtension = useStore((s) => s.requestEscrowExtension);
-  const [reason, setReason] = useState("Lab TAT longer than planned; need more time before release.");
-  const [newDate, setNewDate] = useState(b?.escrow?.expiryDate ?? "");
+  const uploadPaymentClosureManually = useStore((s) => s.uploadPaymentClosureManually);
+  const [documentNo, setDocumentNo] = useState("");
+  const [releasedAmount, setReleasedAmount] = useState(b?.escrow?.poAmount ?? 0);
   if (!b || !b.escrow) return null;
-  const save = () => { if (!newDate.trim() || !reason.trim()) return; requestEscrowExtension(orderId, { reason, newDate }); onClose(); };
+  const save = () => { if (!documentNo.trim()) return; uploadPaymentClosureManually(orderId, { documentNo: documentNo.trim(), releasedAmount }); onClose(); };
   return (
-    <Dialog open onClose={onClose} title="Request escrow-window extension" footer={<Footer onClose={onClose} onSave={save} saveLabel="Email request" disabled={!newDate.trim() || !reason.trim()} />}>
+    <Dialog open onClose={onClose} title="Upload payment closure manually" footer={<Footer onClose={onClose} onSave={save} saveLabel="Attach" disabled={!documentNo.trim()} />}>
       <div className="space-y-3">
-        <p className="text-xs text-muted-foreground">Current expiry: <b className="text-foreground">{b.escrow.expiryDate ?? "—"}</b>. We email the counterparty; the reply (approve / decline) is recorded on the escrow.</p>
-        <Labeled label="New expiry date"><Input type="date" value={newDate} onChange={(e) => setNewDate(e.target.value)} /></Labeled>
-        <Labeled label="Reason"><Textarea value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Why the window needs extending…" /></Labeled>
+        <div className="rounded-lg bg-muted p-2.5 text-xs text-muted-foreground">Fallback for when the Escrow Agent misses the provider&apos;s closure email.</div>
+        <Labeled label="Document no."><Input value={documentNo} onChange={(e) => setDocumentNo(e.target.value)} placeholder="PC2607-1188" /></Labeled>
+        <Labeled label="Released amount"><Input type="number" value={releasedAmount} onChange={(e) => setReleasedAmount(+e.target.value)} /></Labeled>
       </div>
     </Dialog>
   );
@@ -691,7 +722,7 @@ export function UploadDocModal({ orderId, onClose }: { orderId: string; onClose:
     <Dialog open onClose={onClose} title="Attach document (demo)" footer={<Footer onClose={onClose} onSave={save} saveLabel="Attach" disabled={!fileName.trim()} />}>
       <div className="space-y-3">
         <Labeled label="Type"><Select value={docType} onChange={(e) => setDocType(e.target.value)}>
-          {["PO", "PI", "CI", "TAX_INVOICE", "WHL_REPORT", "BOE", "PACKING_LIST", "POD", "ESCROW_INVOICE"].map((t) => <option key={t}>{t}</option>)}</Select></Labeled>
+          {["PO", "PI", "CI", "TAX_INVOICE", "WHL_REPORT", "BOE", "PACKING_LIST", "POD", "SUPER_INVOICE", "ESCROW_INVOICE", "PAYMENT_CLOSURE"].map((t) => <option key={t}>{t}</option>)}</Select></Labeled>
         <Labeled label="File name" hint="no real upload in the POC"><Input value={fileName} onChange={(e) => setFileName(e.target.value)} placeholder="document.pdf" /></Labeled>
       </div>
     </Dialog>

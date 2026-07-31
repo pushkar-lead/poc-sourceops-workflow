@@ -1,6 +1,6 @@
-import type { OrderBundle, JourneyStep, ClientPO, SupplierPO, Lot, LotTest, WhlReport, TestingStage } from "@/types";
+import type { OrderBundle, JourneyStep, ClientPO, SupplierPO, Lot, LotTest, WhlReport, TestingStage, EscrowFeeBreakdown, EscrowOrderStatus } from "@/types";
 import { toUSD } from "@/lib/fx";
-import { WHL_SLA_BUSINESS_DAYS, TESTING_STAGES, TESTING_STAGE_META, TESTING_TERMINAL_STAGE, stageIdx } from "@/data/enums";
+import { WHL_SLA_BUSINESS_DAYS, TESTING_STAGES, TESTING_STAGE_META, TESTING_TERMINAL_STAGE, stageIdx, ESCROW_STATUS_ORDER } from "@/data/enums";
 
 export type OrdersMap = Record<string, OrderBundle>;
 
@@ -33,14 +33,59 @@ export const orderSourcedForClient = (b: OrderBundle, clientPoNo: string, client
 export const deliveredForClientLine = (b: OrderBundle, clientPoNo: string, clientLineMpn: string) =>
   b.deliveries.filter((d) => d.clientPoNo === clientPoNo && d.clientLineMpn === clientLineMpn).reduce((s, d) => s + d.qty, 0);
 
-export const escrowReleased = (b: OrderBundle) =>
-  (b.escrow?.events ?? []).filter((e) => e.type === "RELEASE").reduce((a, e) => a + e.amount, 0);
-export const escrowRefunded = (b: OrderBundle) =>
-  (b.escrow?.events ?? []).filter((e) => e.type === "REFUND").reduce((a, e) => a + e.amount, 0);
-// Releasable/refundable cap: A1 minus whatever already left the account (released to seller OR refunded to buyer).
-// Netting refunds here closes the refund→release and repeat-refund double-spend.
-export const escrowRemaining = (b: OrderBundle) =>
-  Math.max(0, (b.escrow?.materialAmount ?? 0) - escrowReleased(b) - escrowRefunded(b));
+// Index into the strict 8-state escrow progression (higher = further along).
+export const escrowStatusIndex = (status: EscrowOrderStatus) => ESCROW_STATUS_ORDER.indexOf(status);
+
+export function escrowInvoiceTotals(fees: EscrowFeeBreakdown) {
+  const totalFees = fees.feeToBuyer + fees.wiringFeeToBuyer + fees.feeToSeller + fees.wiringFeeToSeller;
+  const totalDisbursedToSeller = fees.poTotal - fees.feeToSeller - fees.wiringFeeToSeller;
+  const totalBuyerTT = fees.poTotal + fees.feeToBuyer + fees.wiringFeeToBuyer;
+  return { totalFees, totalDisbursedToSeller, totalBuyerTT };
+}
+
+// Whether the real-world condition agreed at PO time has actually been met — the thing escrow is
+// meant to protect, not just a manual click-through. Re-derived from data already on the order
+// (line-level testingMode, lots, inbound shipments), same signals gateReason()'s TESTING phase
+// already uses, so this can't drift from what the PO actually promised:
+//   - lines that need testing (WHL or supplier self-test) → every one needs a PASS lot, OR a PASS
+//     recorded via the Escrow tab's own WHL-verdict email action (a parallel signal — WHL is
+//     commissioned directly by 1buy, so this doesn't touch the Testing tab at all)
+//   - lines needing no testing at all → release once the supplier's inbound AWB is in (goods shipped)
+export function escrowReleaseReadiness(b: OrderBundle): { ready: boolean; reason: string } {
+  const need = b.lines.filter((l) => l.testingMode !== "NONE");
+  if (need.length > 0) {
+    const lotsPass = need.every((l) => b.lots.some((lot) => lot.orderLineMpn === l.mpn && lot.testStatus === "PASS"));
+    const emailVerdictPass = b.escrow?.whlVerdict === "PASS";
+    if (lotsPass || emailVerdictPass) return { ready: true, reason: "" };
+    const whl = need.some((l) => l.testingMode === "WHL");
+    return { ready: false, reason: whl ? "Waiting on WHL lab PASS result (Testing tab, or record the WHL verdict via email actions below)." : "Waiting on supplier self-test PASS result (see the Testing tab)." };
+  }
+  const inbound = b.shipments.some((s) => s.leg === "INBOUND" && s.awb && s.awb !== "booking…" && s.awb !== "booking failed");
+  return inbound ? { ready: true, reason: "" } : { ready: false, reason: "No testing was agreed for this PO — waiting on the supplier's inbound AWB (see the Shipments tab)." };
+}
+
+// Whether ONE specific release milestone's own trigger has been met — a multi-tranche invoice has
+// milestones that fire at different points (e.g. 20% on shipment, 50% on PASS), so this can't just
+// reuse the single all-up escrowReleaseReadiness gate for every row. Trigger text is free-form (read
+// off the invoice, not invented by this app — see EscrowConditions), so this matches on the small
+// set of real-world checkpoints it actually uses, falling back to the strongest signal if unrecognized.
+export function escrowMilestoneTriggerMet(b: OrderBundle, trigger: string): boolean {
+  const e = b.escrow; if (!e) return false;
+  const t = trigger.toLowerCase();
+  if (t.includes("ship")) return escrowStatusIndex(e.status) >= escrowStatusIndex("GOODS_SHIPPED");
+  if (t.includes("pass") || t.includes("report")) return escrowReleaseReadiness(b).ready;
+  if (t.includes("receiv")) return !!e.whlGoodsReceivedAt;
+  return escrowReleaseReadiness(b).ready;
+}
+
+// Compares the invoice's buyer-side fee against what was agreed when the supplier PO was drafted (§7).
+export function escrowFeeReconciliation(b: OrderBundle) {
+  const e = b.escrow;
+  if (!e?.invoice) return null;
+  const invoiceFee = e.invoice.fees.feeToBuyer;
+  const agreedFee = e.agreedFeeToBuyer;
+  return { invoiceFee, agreedFee, match: invoiceFee === agreedFee };
+}
 
 export const journeyPct = (b: OrderBundle) =>
   b.journey.length ? Math.round((b.journey.filter((s) => s.status === "DONE").length / b.journey.length) * 100) : 0;
@@ -58,14 +103,17 @@ export function gateReason(b: OrderBundle, step: JourneyStep): string | null {
     return a && a.status === "APPROVED" ? null : "PO review not approved yet.";
   }
   if (n.includes("release escrow")) {
-    return escrowReleased(b) > 0 ? null : "No escrow released yet (record a lab PASS, then release the tranche).";
+    return b.escrow?.status === "RELEASED_TO_SELLER" ? null : "Escrow hasn't reached Released to Seller yet (see the Escrow tab).";
   }
   if (n.includes("collect")) { // collect-before-pay for non-escrow orders
     return b.payments.some((p) => p.direction === "CLIENT_TO_1BUY" && (p.status === "INITIATED" || p.status === "PAID"))
       ? null : "No client collection recorded yet — secure buyer funds before paying the supplier.";
   }
   if (step.phase === "PAYMENT") {
-    if (b.escrow) return ["FUNDED", "PARTIALLY_RELEASED", "RELEASED"].includes(b.escrow.status) ? null : "Escrow not funded yet.";
+    if (b.escrow) {
+      if (b.escrow.cancelledAt) return "Escrow order was cancelled (see the Escrow tab).";
+      return escrowStatusIndex(b.escrow.status) >= escrowStatusIndex("TT_PAYMENT_RECEIVED") ? null : "Escrow T/T payment not received yet (see the Escrow tab).";
+    }
     return b.payments.some((p) => p.direction === "1BUY_TO_SUPPLIER" && (p.status === "INITIATED" || p.status === "PAID")) ? null : "Supplier payment not initiated yet.";
   }
   if (step.phase === "TESTING") {
@@ -274,8 +322,7 @@ export const allLots = (o: OrdersMap) =>
 
 export const allEscrow = (o: OrdersMap) =>
   Object.values(o).filter((b) => b.escrow).map((b) => ({
-    orderId: b.id, orderNo: b.orderNo, party: b.supplier.name, e: b.escrow!,
-    released: escrowReleased(b), remaining: escrowRemaining(b),
+    orderId: b.id, orderNo: b.orderNo, e: b.escrow!,
   }));
 
 export const allShipments = (o: OrdersMap) =>
@@ -302,7 +349,12 @@ export function kpis(o: OrdersMap) {
   const paymentsDue = allPayments(o).filter((p) => p.status === "PENDING" || p.status === "INITIATED").length;
   const testsPending = allLots(o).filter((l) => l.testStatus === "PENDING" || l.testStatus === "MAYBE").length;
   const blocked = bundles.filter((b) => b.status === "ON_HOLD" || b.journey.some((s) => s.status === "BLOCKED")).length;
-  const escrowToRelease = bundles.reduce((a, b) => a + (b.escrow && ["FUNDED", "PARTIALLY_RELEASED"].includes(b.escrow.status) ? toUSD(escrowRemaining(b), b.currency) : 0), 0);
+  const escrowToRelease = bundles.reduce((a, b) => {
+    if (!b.escrow) return a;
+    const idx = escrowStatusIndex(b.escrow.status);
+    const parked = idx >= escrowStatusIndex("TT_PAYMENT_RECEIVED") && idx < escrowStatusIndex("RELEASED_TO_SELLER");
+    return a + (parked ? toUSD(b.escrow.poAmount, b.currency) : 0);
+  }, 0);
   return { open, pendingApprovals, paymentsDue, testsPending, blocked, escrowToRelease };
 }
 

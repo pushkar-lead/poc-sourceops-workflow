@@ -24,21 +24,17 @@ export interface IntegrationSystem {
 
 export const INTEGRATIONS: IntegrationSystem[] = [
   {
-    key: "escrow-hkin",
-    label: "HKIN Escrow",
+    key: "escrow-agent",
+    label: "Escrow Agent (invoice inbox)",
     category: "Money",
     priority: "must",
     criticalPath: true,
-    envVar: "NEXT_PUBLIC_HKIN_BASE_URL",
-    baseUrl: "https://sandbox.hkin-escrow.example/api/v1",
-    description: "3-party escrow (buyer/seller/agent). Sharpbuy is the account holder; counterparties pass as opaque tokens. Only A1 (material) is releasable to the seller.",
-    wiredInto: ["fundEscrow", "releaseEscrow", "refundEscrow"],
+    envVar: "NEXT_PUBLIC_ESCROW_AGENT_URL",
+    baseUrl: "https://sandbox.escrow-agent.example/api/v1",
+    description: "Watches the escrow provider's billing inbox for invoice emails, matches them to the order, and extracts the fee breakdown + conditions (modelled on HKin.com). Manual upload stays available as a fallback when the agent misses an email.",
+    wiredInto: ["simulateEscrowInvoiceEmail"],
     endpoints: [
-      { method: "POST", path: "/accounts", purpose: "open account (super-invoice A1+A2)" },
-      { method: "POST", path: "/accounts/:ref/fund", purpose: "buyer funds the super-invoice" },
-      { method: "POST", path: "/accounts/:ref/release", purpose: "release tranche on WHL PASS" },
-      { method: "POST", path: "/accounts/:ref/refund", purpose: "refund on FAIL / cancellation" },
-      { method: "GET", path: "/accounts/:ref", purpose: "status + ledger" },
+      { method: "GET", path: "/inbox/latest", purpose: "poll the provider mailbox for the next escrow invoice email" },
     ],
   },
   {
@@ -65,7 +61,7 @@ export const INTEGRATIONS: IntegrationSystem[] = [
     criticalPath: true,
     envVar: "NEXT_PUBLIC_WHL_API_BASE_URL",
     baseUrl: "https://api.whl-labs.example/v1",
-    description: "Authenticity + quality testing. The lab PASS gates the TESTING journey step AND unlocks the escrow release tranche.",
+    description: "Authenticity + quality testing. The lab PASS gates the TESTING journey step (escrow release runs on its own state machine — see the Escrow tab).",
     wiredInto: ["addLot", "fetchLabResult"],
     endpoints: [
       { method: "POST", path: "/work-orders", purpose: "submit a lot for testing" },

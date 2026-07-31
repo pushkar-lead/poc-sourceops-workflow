@@ -84,7 +84,7 @@ export default function IntegrationsConsolePage() {
       {/* Live call log */}
       <Panel title={<span className="flex items-center gap-2"><Activity className="h-4 w-4 text-primary" /> Live API call log</span>}>
         {calls.length === 0 ? (
-          <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">No calls yet — drive the flow (file a BOE, create a shipment, fund escrow, fetch a lab result…) or hit <b>Ping</b>.</div>
+          <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">No calls yet — drive the flow (file a BOE, create a shipment, fetch an escrow invoice, fetch a lab result…) or hit <b>Ping</b>.</div>
         ) : (
           <div className="space-y-1.5">
             {calls.map((c) => (

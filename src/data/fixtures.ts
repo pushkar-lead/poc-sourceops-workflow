@@ -1,11 +1,12 @@
 import type {
-  Order, OrderBundle, JourneyStep, JourneyPhase, Lot, Escrow, Payment,
+  Order, OrderBundle, JourneyStep, JourneyPhase, Lot, Escrow, EscrowOrderStatus, EscrowFeeBreakdown, EscrowConditions, MilestoneRelease, WhlVerdict, Payment,
   Shipment, CustomsEntry, DeliveryAllocation, SourcingAllocation, DocumentRef, Approval, OrderEvent, OrderLine, ClientPO, SupplierPO, TestingMode, Address,
   MpnTestSpec, LabEmail, LotTest, WhlReport, TestProcessStatus, TestAuditEntry, LotNotification,
   TestingStage, TestingStageEvent,
 } from "@/types";
-import { WHL_CONFIDENTIALITY } from "@/data/enums";
+import { WHL_CONFIDENTIALITY, ESCROW_STATUS_ORDER } from "@/data/enums";
 import { ORDER_DETAILS } from "@/data/order-details";
+import { DEMO_ESCROW_BANK_ACCOUNT } from "@/integrations/escrow-agent";
 
 export const HERO_ID = "ord-148";
 
@@ -128,6 +129,204 @@ export const ORDERS: Order[] = [
       testingTerms: "No incoming test — waived by client in writing", dateCode: "25+", warranty: "6 months",
     },
   },
+
+  // ---- Escrow E2E test orders (ord-180..195) — one per stage of the 8-state flow, plus every edge
+  // case (cancel, fee mismatch, FAIL→retest, FAIL→return, release via WHL PASS, release via AWB-only)
+  // and a spread of genuinely different invoice terms (paired with ESCROW_SEED_SCENARIOS below).
+  // This is the full, current set — nothing legacy left over from earlier passes.
+  {
+    id: "ord-180", orderNo: "ORD-2026-000180", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Vantage Robotics", country: "US" }, supplier: { name: "Nakamura Electronics", country: "JP" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "WHL",
+    leadTimeDays: 20, testingTimeDays: 6, deliveryTimeDays: 8,
+    expectedDispatchDate: "2026-08-18", expectedDeliveryDate: "2026-08-26", requiredBy: "2026-09-01",
+    buyTotal: 9400, sellTotal: 10700, createdBy: "A. Sharma", createdAt: "2026-07-20",
+  },
+  {
+    id: "ord-181", orderNo: "ORD-2026-000181", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Solstice Devices", country: "DE" }, supplier: { name: "Suzhou Precision Co", country: "CN" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "SUPPLIER_SELF",
+    leadTimeDays: 18, testingTimeDays: 4, deliveryTimeDays: 7,
+    expectedDispatchDate: "2026-08-15", expectedDeliveryDate: "2026-08-22", requiredBy: "2026-08-29",
+    buyTotal: 14200, sellTotal: 16100, createdBy: "A. Sharma", createdAt: "2026-07-21",
+  },
+  {
+    id: "ord-182", orderNo: "ORD-2026-000182", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Meridian Systems", country: "SG" }, supplier: { name: "Hsinchu Semi", country: "TW" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "NONE",
+    leadTimeDays: 22, testingTimeDays: 6, deliveryTimeDays: 9,
+    expectedDispatchDate: "2026-08-20", expectedDeliveryDate: "2026-08-29", requiredBy: "2026-09-04",
+    buyTotal: 21500, sellTotal: 24400, createdBy: "A. Sharma", createdAt: "2026-07-22",
+  },
+  {
+    id: "ord-183", orderNo: "ORD-2026-000183", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Falcon Aerotech", country: "US" }, supplier: { name: "Yokohama Components", country: "JP" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "WHL",
+    leadTimeDays: 21, testingTimeDays: 6, deliveryTimeDays: 9,
+    expectedDispatchDate: "2026-08-14", expectedDeliveryDate: "2026-08-23", requiredBy: "2026-08-30",
+    buyTotal: 32800, sellTotal: 37200, createdBy: "A. Sharma", createdAt: "2026-07-18",
+  },
+  {
+    id: "ord-184", orderNo: "ORD-2026-000184", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Ironwood Systems", country: "GB" }, supplier: { name: "Foshan Connector Co", country: "CN" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "SUPPLIER_SELF",
+    leadTimeDays: 16, testingTimeDays: 4, deliveryTimeDays: 6,
+    expectedDispatchDate: "2026-08-06", expectedDeliveryDate: "2026-08-13", requiredBy: "2026-08-19",
+    buyTotal: 11200, sellTotal: 12700, createdBy: "P. Nair", createdAt: "2026-07-16",
+  },
+  {
+    id: "ord-185", orderNo: "ORD-2026-000185", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Harbor Technologies", country: "SG" }, supplier: { name: "Xiamen Components", country: "CN" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "WHL",
+    leadTimeDays: 16, testingTimeDays: 4, deliveryTimeDays: 6,
+    expectedDispatchDate: "2026-08-04", expectedDeliveryDate: "2026-08-11", requiredBy: "2026-08-17",
+    buyTotal: 8300, sellTotal: 9400, createdBy: "P. Nair", createdAt: "2026-07-11",
+  },
+  {
+    id: "ord-186", orderNo: "ORD-2026-000186", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Nimbus Controls", country: "CA" }, supplier: { name: "Dongguan Electronics", country: "CN" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "WHL",
+    leadTimeDays: 17, testingTimeDays: 4, deliveryTimeDays: 7,
+    expectedDispatchDate: "2026-08-10", expectedDeliveryDate: "2026-08-17", requiredBy: "2026-08-24",
+    buyTotal: 12900, sellTotal: 14600, createdBy: "A. Sharma", createdAt: "2026-07-17",
+  },
+  {
+    id: "ord-187", orderNo: "ORD-2026-000187", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Cascade Instruments", country: "US" }, supplier: { name: "Ningbo Micro Ltd", country: "CN" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "SUPPLIER_SELF",
+    leadTimeDays: 20, testingTimeDays: 6, deliveryTimeDays: 8,
+    expectedDispatchDate: "2026-08-09", expectedDeliveryDate: "2026-08-17", requiredBy: "2026-08-24",
+    buyTotal: 19800, sellTotal: 22400, createdBy: "A. Sharma", createdAt: "2026-07-13",
+  },
+  {
+    id: "ord-188", orderNo: "ORD-2026-000188", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Redwood Systems", country: "US" }, supplier: { name: "Busan Parts Co", country: "KR" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "NONE",
+    leadTimeDays: 14, testingTimeDays: 0, deliveryTimeDays: 6,
+    expectedDispatchDate: "2026-08-05", expectedDeliveryDate: "2026-08-11", requiredBy: "2026-08-16",
+    buyTotal: 18700, sellTotal: 21200, createdBy: "P. Nair", createdAt: "2026-07-15",
+  },
+  {
+    id: "ord-189", orderNo: "ORD-2026-000189", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Polaris Avionics", country: "CA" }, supplier: { name: "Tainan Optics Co", country: "TW" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "WHL",
+    leadTimeDays: 22, testingTimeDays: 7, deliveryTimeDays: 9,
+    expectedDispatchDate: "2026-08-19", expectedDeliveryDate: "2026-08-28", requiredBy: "2026-09-03",
+    buyTotal: 24700, sellTotal: 27900, createdBy: "A. Sharma", createdAt: "2026-07-19",
+  },
+  {
+    id: "ord-190", orderNo: "ORD-2026-000190", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Beacon Robotics", country: "US" }, supplier: { name: "Osaka Precision Ltd", country: "JP" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "WHL",
+    leadTimeDays: 18, testingTimeDays: 5, deliveryTimeDays: 8,
+    expectedDispatchDate: "2026-08-02", expectedDeliveryDate: "2026-08-10", requiredBy: "2026-08-15",
+    buyTotal: 33500, sellTotal: 37900, createdBy: "A. Sharma", createdAt: "2026-07-10",
+  },
+  {
+    id: "ord-191", orderNo: "ORD-2026-000191", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Atlas Modules", country: "AU" }, supplier: { name: "Shenzhen Sensor Co", country: "CN" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "NONE",
+    leadTimeDays: 19, testingTimeDays: 0, deliveryTimeDays: 8,
+    expectedDispatchDate: "2026-08-06", expectedDeliveryDate: "2026-08-14", requiredBy: "2026-08-20",
+    buyTotal: 26400, sellTotal: 29900, createdBy: "A. Sharma", createdAt: "2026-07-12",
+  },
+  {
+    id: "ord-192", orderNo: "ORD-2026-000192", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Aurora Sensing Ltd", country: "GB" }, supplier: { name: "Qingdao Electronics Co", country: "CN" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "WHL",
+    leadTimeDays: 19, testingTimeDays: 5, deliveryTimeDays: 8,
+    expectedDispatchDate: "2026-08-07", expectedDeliveryDate: "2026-08-15", requiredBy: "2026-08-21",
+    buyTotal: 15400, sellTotal: 17500, createdBy: "A. Sharma", createdAt: "2026-07-14",
+  },
+  {
+    id: "ord-193", orderNo: "ORD-2026-000193", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Titan Aerostructures", country: "US" }, supplier: { name: "Kaohsiung Circuits Ltd", country: "TW" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "WHL",
+    leadTimeDays: 21, testingTimeDays: 6, deliveryTimeDays: 9,
+    expectedDispatchDate: "2026-08-08", expectedDeliveryDate: "2026-08-17", requiredBy: "2026-08-23",
+    buyTotal: 21800, sellTotal: 24700, createdBy: "A. Sharma", createdAt: "2026-07-09",
+  },
+  {
+    id: "ord-194", orderNo: "ORD-2026-000194", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Zenith Photonics", country: "SG" }, supplier: { name: "Shenzhen Micro Co", country: "CN" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "WHL",
+    leadTimeDays: 20, testingTimeDays: 6, deliveryTimeDays: 8,
+    expectedDispatchDate: "2026-07-20", expectedDeliveryDate: "2026-07-28", requiredBy: "2026-08-02",
+    buyTotal: 28600, sellTotal: 32400, createdBy: "A. Sharma", createdAt: "2026-06-25",
+  },
+  {
+    id: "ord-195", orderNo: "ORD-2026-000195", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Quantum Field Systems", country: "US" }, supplier: { name: "Incheon Passive Co", country: "KR" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "WHL",
+    leadTimeDays: 21, testingTimeDays: 6, deliveryTimeDays: 9,
+    expectedDispatchDate: "2026-08-16", expectedDeliveryDate: "2026-08-25", requiredBy: "2026-09-01",
+    buyTotal: 13300, sellTotal: 15100, createdBy: "P. Nair", createdAt: "2026-07-24",
+  },
+
+  // ---- Draft-stage escrow orders (ord-196..200) — each carries different agreedConditions so
+  // walking one forward to the invoice stage shows that order's own pre-agreed terms, not a
+  // one-size-fits-all default (paired with ESCROW_SEED_SCENARIOS below).
+  {
+    id: "ord-196", orderNo: "ORD-2026-000196", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Meridian Aerostructures", country: "US" }, supplier: { name: "Osaka Fasteners Ltd", country: "JP" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "WHL",
+    leadTimeDays: 20, testingTimeDays: 6, deliveryTimeDays: 8,
+    expectedDispatchDate: "2026-08-28", expectedDeliveryDate: "2026-09-05", requiredBy: "2026-09-11",
+    buyTotal: 16800, sellTotal: 19100, createdBy: "A. Sharma", createdAt: "2026-07-29",
+  },
+  {
+    id: "ord-197", orderNo: "ORD-2026-000197", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Halcyon Instruments", country: "DE" }, supplier: { name: "Suzhou Precision Co", country: "CN" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "SUPPLIER_SELF",
+    leadTimeDays: 17, testingTimeDays: 4, deliveryTimeDays: 6,
+    expectedDispatchDate: "2026-08-25", expectedDeliveryDate: "2026-09-01", requiredBy: "2026-09-07",
+    buyTotal: 9700, sellTotal: 11000, createdBy: "A. Sharma", createdAt: "2026-07-28",
+  },
+  {
+    id: "ord-198", orderNo: "ORD-2026-000198", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Vertex Photonics", country: "SG" }, supplier: { name: "Dongguan Electronics", country: "CN" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "WHL",
+    leadTimeDays: 23, testingTimeDays: 7, deliveryTimeDays: 9,
+    expectedDispatchDate: "2026-09-02", expectedDeliveryDate: "2026-09-12", requiredBy: "2026-09-18",
+    buyTotal: 27300, sellTotal: 30900, createdBy: "P. Nair", createdAt: "2026-07-27",
+  },
+  {
+    id: "ord-199", orderNo: "ORD-2026-000199", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Redshift Robotics", country: "US" }, supplier: { name: "Busan Parts Co", country: "KR" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "NONE",
+    leadTimeDays: 14, testingTimeDays: 0, deliveryTimeDays: 6,
+    expectedDispatchDate: "2026-08-20", expectedDeliveryDate: "2026-08-26", requiredBy: "2026-08-31",
+    buyTotal: 12400, sellTotal: 14000, createdBy: "P. Nair", createdAt: "2026-07-26",
+  },
+  {
+    id: "ord-200", orderNo: "ORD-2026-000200", operatingMode: "MOR", tradeType: "INTERNATIONAL",
+    status: "ACTIVE", approvalStatus: "APPROVED",
+    buyer: { name: "Solaris Defense Systems", country: "GB" }, supplier: { name: "Nakamura Electronics", country: "JP" },
+    maskingEntity: "Sharpbuy Global Solutions", currency: "USD", incoterm: "FOB", paymentMode: "ESCROW", testingMode: "WHL",
+    leadTimeDays: 15, testingTimeDays: 3, deliveryTimeDays: 6,
+    expectedDispatchDate: "2026-08-18", expectedDeliveryDate: "2026-08-24", requiredBy: "2026-08-29",
+    buyTotal: 20500, sellTotal: 23200, createdBy: "A. Sharma", createdAt: "2026-07-30",
+  },
 ];
 
 // ---- policy-assembled journey (stages switch on/off per order) ----
@@ -147,14 +346,14 @@ function seedSteps(o: Order): Seed[] {
   // escrow funds buyer money up-front (collect-before-pay baked in); non-escrow needs an explicit collect gate first
   if (!escrow) s.push({ phase: "PAYMENT", name: "Collect advance from client", owner: "Finance", isGate: true });
   s.push(escrow
-    ? { phase: "PAYMENT", name: "Fund escrow (super-invoice A1+A2)", owner: "Finance", isGate: true }
+    ? { phase: "PAYMENT", name: "Escrow: T/T payment received", owner: "Finance", isGate: true }
     : { phase: "PAYMENT", name: `Pay supplier — ${o.paymentMode.toLowerCase()}`, owner: "Finance", isGate: true });
   if (testing) {
     const whl = testingModeOf(o) === "WHL";
     s.push({ phase: "TESTING", name: `Testing — ${whl ? "WHL lab" : "supplier self-test"}`, owner: whl ? "Lab" : "Supplier", isGate: true });
   }
   // escrow ALWAYS needs a release step, else money stays trapped (ESCROW + testing=NONE). Trigger = PASS when tested, else acceptance/GRN.
-  if (escrow) s.push({ phase: "PAYMENT", name: testing ? "Release escrow on PASS" : "Release escrow (on acceptance)", owner: "Finance", isGate: true });
+  if (escrow) s.push({ phase: "PAYMENT", name: "Release escrow (to seller)", owner: "Finance", isGate: true });
   if (customsy) {
     // gated: an inbound shipment must exist before customs can be filed
     s.push({ phase: "IMPORT", name: intl ? "Ship to India (inbound AWB)" : "Export to lab → re-import", owner: "SC", isGate: true });
@@ -167,7 +366,7 @@ function seedSteps(o: Order): Seed[] {
   return s;
 }
 
-function testingModeOf(o: Order): TestingMode {
+export function testingModeOf(o: Order): TestingMode {
   if (o.testingMode) return o.testingMode; // real mode carried from the supplier PO drives the journey
   // fallback heuristic only for seeded fixtures with no explicit mode
   if (o.id === "ord-155") return "NONE";
@@ -493,14 +692,64 @@ const HERO_LAB_EMAILS: LabEmail[] = [
     body: "Report 352146.1 attached. Electrical Test not acceptable (2 of 20 units outside Vdd tolerance); die analysis held." },
 ];
 
+// Contact cards + invoice fee/condition/bank-account shapes below mirror a real HKin.com escrow
+// order and user-guide PDF (field names, fee lines, conditions table, warranty wording) — see
+// Escrow spec §10. Entity names/amounts stay consistent with this order's own buyer/supplier
+// rather than fictional placeholder names, so the Escrow tab doesn't contradict the Overview tab.
+// Registered address/contact-person/email/phone below are demo placeholders — NOT the real
+// company/contact details behind the reference document this was modelled on.
 const HERO_ESCROW: Escrow = {
-  id: "esc-148", provider: "HKIN", externalRef: "ES2607-5881", currency: "USD",
-  materialAmount: 7013, chargesAmount: 140, bankingCharges: 35, feeSeller: 300, feeBuyer: 150, superInvoiceTotal: 7638,
-  releaseTrigger: "WHL PASS", paymentTerms: "Advance via T/T into escrow", expiryDate: "2026-09-01", status: "PARTIALLY_RELEASED",
-  events: [
-    { id: "ee1", type: "FUND", amount: 7013, trigger: "Buyer funded super-invoice (material A1 held)", occurredAt: "2026-07-18" },
-    { id: "ee2", type: "HOLD", amount: 7013, trigger: "Awaiting WHL results", occurredAt: "2026-07-18" },
-    { id: "ee3", type: "RELEASE", amount: 3500, trigger: "LOT-A WHL PASS (report 352146.1)", occurredAt: "2026-07-25" },
+  id: "esc-148", status: "RECIPIENT_INSPECTION",
+  buyerContact: { company: "Sharpbuy Global Solutions", registeredAddress: "New Delhi, Delhi, India (masking entity — on file)", country: "India", contactPerson: "SC Ops Desk", email: "scops@sharpbuy.demo", phone: "+91 98XXX XXXXX (demo)", im: "—" },
+  sellerContact: { company: "Shenzhen Micro Co", registeredAddress: "Futian District, Shenzhen, Guangdong, China", country: "China", contactPerson: "Ms. Wei Lin (Sales)", email: "sales@shenzhenmicro.example", phone: "+86 755 XXXX XXXX (demo)", im: "—" },
+  poAmount: 7013, currency: "USD",
+  useInspectionService: true,
+  recipient: { company: "Meridian Test Laboratories Ltd", registeredAddress: "Gang Zhi Long Science Park, Qinglong Road, Shenzhen, China", country: "China", contactPerson: "Mr. Chen, Lab Coordinator", email: "chen@meridiantestlabs.example", phone: "+86 755 8364 0311", im: "WeChat: mtl_chen" },
+  agreedFeeToBuyer: 60,
+  // Agreed at PO-drafting time — the invoice below (once it arrived) quotes these same terms.
+  agreedConditions: {
+    forwarder: "DHL", forwarderAccountNo: "DHL-ACC-88213 (demo)", shipWithinDays: "7 business days", inspectionPeriod: "5 business days",
+    feeSharingLabel: "100% Buyer / 0% Seller", returnCondition: "7 business days, shipping fees to Seller",
+    releaseMilestones: [{ percent: 30, trigger: "On shipment to WHL for testing" }, { percent: 70, trigger: "On WHL PASS report" }],
+  },
+  invoice: {
+    invoiceNo: "AE2607-1188", receivedAt: "2026-07-18",
+    fees: { poTotal: 7013, feeToBuyer: 60, wiringFeeToBuyer: 40, feeToSeller: 0, wiringFeeToSeller: 0 },
+    conditions: {
+      forwarder: "DHL", forwarderAccountNo: "DHL-ACC-88213 (demo)", shipWithinDays: "7 business days", inspectionPeriod: "5 business days",
+      feeSharingLabel: "100% Buyer / 0% Seller", returnCondition: "7 business days, shipping fees to Seller",
+      releaseMilestones: [{ percent: 30, trigger: "On shipment to WHL for testing" }, { percent: 70, trigger: "On WHL PASS report" }],
+    },
+    bankAccount: DEMO_ESCROW_BANK_ACCOUNT,
+  },
+  paymentInstructedAt: "2026-07-19", financeConfirmedAt: "2026-07-19", financeUtr: "UTR20260719A912",
+  paymentSentToHkinAt: "2026-07-20",
+  whlGoodsReceivedAt: "2026-07-24",
+  whlVerdict: "PASS", whlVerdictAt: "2026-07-25", whlReportRef: "352146.2", // LOT-A's current WHL report on the Testing tab
+  // First tranche (30% on shipment) already settled; second (70% on PASS) is the one action away
+  // from release the hero order is meant to demo — whlVerdict is already PASS, ready to send.
+  milestoneReleases: [
+    { index: 0, instructedAt: "2026-07-21", confirmedAt: "2026-07-22" },
+  ],
+  agentEmails: [
+    { id: "ea-deal", direction: "SENT", subject: "Order ORD-2026-000148 — please confirm acceptance", from: "you@1buy.ai", to: "billing@hkin-escrow.example",
+      snippet: "Order terms + WHL ship-to instructions (Meridian Test Laboratories Ltd) + inspection period sent to HKin for Shenzhen Micro Co's acceptance.", receivedAt: "2026-07-14" },
+    { id: "ea-hkinconf", direction: "RECEIVED", subject: "Escrow order confirmed — ORD-2026-000148", from: "billing@hkin-escrow.example",
+      snippet: "Seller has accepted order ord-148 — PO 7013 USD, inspection period 5 business days, fee sharing 100% Buyer / 0% Seller, WHL ship-to Meridian Test Laboratories Ltd.", receivedAt: "2026-07-15" },
+    { id: "ea1", direction: "RECEIVED", subject: "Escrow invoice AE2607-1188 — ORD-2026-000148", from: "billing@hkin-escrow.example",
+      snippet: "Please find attached the escrow invoice for order ORD-2026-000148.", receivedAt: "2026-07-18", attachmentFileName: "AE2607-1188.pdf" },
+    { id: "ea-fin", direction: "SENT", subject: "Payment instruction — ORD-2026-000148", from: "you@1buy.ai", to: "finance@1buy.ai",
+      snippet: "Invoice reviewed — please remit per the release milestones on file (30% on WHL shipment, 70% on PASS report).", receivedAt: "2026-07-19" },
+    { id: "ea-hkinpay", direction: "SENT", subject: "Payment sent — ORD-2026-000148", from: "finance@1buy.ai", to: "billing@hkin-escrow.example",
+      snippet: "We've remitted the T/T per invoice AE2607-1188 — please confirm receipt.", receivedAt: "2026-07-20" },
+    { id: "ea-payconf", direction: "RECEIVED", subject: "Payment received — ORD-2026-000148", from: "billing@hkin-escrow.example",
+      snippet: "HKin confirms the T/T payment has been received into escrow.", receivedAt: "2026-07-20" },
+    { id: "ea-shipnotice", direction: "RECEIVED", subject: "Shipment dispatched — ORD-2026-000148", from: "sales@shenzhenmicro.example",
+      snippet: "Supplier confirms goods have been dispatched; AWB attached.", receivedAt: "2026-07-23" },
+    { id: "ea-goodsrecv", direction: "RECEIVED", subject: "Goods received — ORD-2026-000148", from: "labs@whl-labs.example",
+      snippet: "WHL confirms receipt of the shipment for testing.", receivedAt: "2026-07-24" },
+    { id: "ea-verdict", direction: "RECEIVED", subject: "WHL verdict: PASS — ORD-2026-000148", from: "reports@whl-labs.example",
+      snippet: "WHL confirms PASS — detailed report 352146.2 attached.", receivedAt: "2026-07-25", attachmentFileName: "WHL-352146.2.pdf" },
   ],
 };
 
@@ -534,7 +783,7 @@ const HERO_SOURCING: SourcingAllocation[] = [
 const HERO_DOCS: DocumentRef[] = [
   { id: "d1", subjectType: "ORDER", docType: "PO", fileName: "buyer-po-ORD148.pdf", uploadedBy: "A. Sharma", uploadedAt: "2026-07-14" },
   { id: "d2", subjectType: "ORDER", docType: "PI", fileName: "supplier-pi-shenzhen.pdf", uploadedBy: "A. Sharma", uploadedAt: "2026-07-17" },
-  { id: "d3", subjectType: "ESCROW", docType: "ESCROW_INVOICE", fileName: "ES2607-5881.pdf", uploadedBy: "R. Menon", uploadedAt: "2026-07-18" },
+  { id: "d3", subjectType: "ESCROW", docType: "ESCROW_INVOICE", fileName: "AE2607-1188.pdf", uploadedBy: "Escrow Agent", uploadedAt: "2026-07-18" },
   { id: "d4", subjectType: "LOT", docType: "WHL_REPORT", fileName: "WHL-352146.1.pdf", uploadedBy: "WHL (email)", uploadedAt: "2026-07-24" },
   { id: "d5", subjectType: "LOT", docType: "WHL_REPORT", fileName: "WHL-352146.2.pdf", uploadedBy: "WHL (email)", uploadedAt: "2026-07-25" },
   { id: "d6", subjectType: "LOT", docType: "WHL_REPORT", fileName: "WHL-352147.1.pdf", uploadedBy: "WHL (email)", uploadedAt: "2026-07-26" },
@@ -546,10 +795,124 @@ const HERO_APPROVALS: Approval[] = [
 ];
 
 const HERO_EVENTS: OrderEvent[] = [
-  { id: "ev1", eventType: "GENERAL", message: "Escrow funded (super-invoice ES2607-5881).", source: "SC_MANUAL", occurredAt: "2026-07-18", recordedBy: "R. Menon" },
+  { id: "ev1", eventType: "GENERAL", message: "Escrow invoice AE2607-1188 received — fees reconciled OK.", source: "SC_MANUAL", occurredAt: "2026-07-18", recordedBy: "R. Menon" },
   { id: "ev2", eventType: "LEAD_TIME_UPDATE", message: "Supplier: ~1 week to dispatch remaining.", source: "SC_MANUAL", occurredAt: "2026-07-23", recordedBy: "A. Sharma" },
   { id: "ev3", eventType: "DELAY", message: "LOT-B flagged MAYBE by WHL — awaiting client decision.", source: "SC_MANUAL", occurredAt: "2026-07-26", recordedBy: "A. Sharma" },
 ];
+
+interface EscrowSeedScenario {
+  status: EscrowOrderStatus;
+  whlVerdict?: WhlVerdict;
+  refundRequested?: boolean;  // FAIL + client asked for a refund instead of a retest (Testing tab owns the retest/return decision itself)
+  refundInstructed?: boolean; // SC already sent the refund instruction to HKin + supplier
+  cancelled?: boolean;
+  feeMismatch?: boolean;    // invoice fee ≠ agreedFeeToBuyer, to demo the red §7 reconciliation banner
+  seedInboundAwb?: boolean; // seed a real inbound AWB, for the "no testing agreed → release on AWB" path
+  conditionsOverride?: Partial<EscrowConditions>; // different real-world invoices quote different terms — override the default per order
+}
+
+// One order per stage of the 8-state flow, plus every edge case and a spread of genuinely
+// different invoice terms — the complete, current escrow E2E test suite (see ord-180..195 above).
+const ESCROW_SEED_SCENARIOS: Record<string, EscrowSeedScenario> = {
+  "ord-180": { status: "DRAFT" }, // fresh — walk the whole flow by hand from here
+  "ord-181": { status: "SENT_FOR_SELLER_CONFIRMATION" },
+  "ord-182": { status: "SELLER_CONFIRMED" }, // ready for the invoice to arrive
+  "ord-183": { status: "ESCROW_FEE_INVOICED" }, // invoice in hand, default/baseline terms — review it, then instruct Finance
+
+  "ord-184": { // single milestone (100% on PASS only, no shipment tranche); fee split 50/50; slower inspection window
+    status: "ESCROW_FEE_INVOICED",
+    conditionsOverride: {
+      feeSharingLabel: "50% Buyer / 50% Seller", inspectionPeriod: "10 business days",
+      returnCondition: "5 business days, shipping fees to Buyer",
+      releaseMilestones: [{ percent: 100, trigger: "On WHL PASS report" }],
+    },
+  },
+  "ord-185": { status: "ESCROW_FEE_INVOICED", feeMismatch: true }, // red §7 reconciliation banner visible on load
+
+  "ord-186": { // 3-way milestone split; fee entirely on the seller's side; longer ship-within window
+    status: "TT_PAYMENT_RECEIVED",
+    conditionsOverride: {
+      feeSharingLabel: "0% Buyer / 100% Seller", shipWithinDays: "14 business days", forwarder: "FedEx",
+      releaseMilestones: [
+        { percent: 20, trigger: "On WHL booking confirmed" },
+        { percent: 30, trigger: "On shipment to WHL for testing" },
+        { percent: 50, trigger: "On WHL PASS report" },
+      ],
+    },
+  },
+  "ord-187": { // fast 50/50 split, 3-day ship window
+    status: "GOODS_SHIPPED",
+    conditionsOverride: {
+      feeSharingLabel: "70% Buyer / 30% Seller", shipWithinDays: "3 business days", inspectionPeriod: "2 business days",
+      releaseMilestones: [{ percent: 50, trigger: "On shipment to WHL for testing" }, { percent: 50, trigger: "On WHL PASS report" }],
+    },
+  },
+  "ord-188": { // no testing agreed at all — single milestone on hub receipt, fee flipped onto the seller
+    status: "GOODS_SHIPPED",
+    conditionsOverride: {
+      feeSharingLabel: "0% Buyer / 100% Seller", returnCondition: "10 business days, shipping fees to Buyer",
+      releaseMilestones: [{ percent: 100, trigger: "On goods received at the hub (no testing agreed)" }],
+    },
+  },
+
+  "ord-189": { status: "RECIPIENT_INSPECTION" }, // awaiting a WHL verdict — no verdict recorded yet
+  "ord-190": { // WHL PASS already recorded → release-ready now, non-default milestone split
+    status: "RECIPIENT_INSPECTION", whlVerdict: "PASS",
+    conditionsOverride: {
+      feeSharingLabel: "70% Buyer / 30% Seller",
+      releaseMilestones: [{ percent: 50, trigger: "On shipment to WHL for testing" }, { percent: 50, trigger: "On WHL PASS report" }],
+    },
+  },
+  "ord-191": { // no testing agreed + AWB in → release-ready via the AWB path, not a lab verdict
+    status: "RECIPIENT_INSPECTION", seedInboundAwb: true,
+    conditionsOverride: {
+      feeSharingLabel: "0% Buyer / 100% Seller",
+      releaseMilestones: [{ percent: 100, trigger: "On goods received (no testing agreed)" }],
+    },
+  },
+  "ord-192": { status: "RECIPIENT_INSPECTION", whlVerdict: "FAIL" }, // fresh FAIL — Testing tab is deciding retest/return, nothing to do here yet
+  "ord-193": { status: "RECIPIENT_INSPECTION", whlVerdict: "FAIL", refundRequested: true }, // client asked for a refund instead — ready to send the refund instruction
+
+  "ord-194": { status: "RELEASED_TO_SELLER" }, // fully closed — payment closure demo
+  "ord-195": { status: "DRAFT", cancelled: true }, // cancelled escrow order
+
+  // Draft-stage orders with different agreedConditions — walk each forward by hand (Send to
+  // seller → seller accepts → fetch invoice) and confirm the invoice quotes THIS order's terms.
+  "ord-196": { status: "DRAFT" }, // baseline: 30/70 milestones, 100% Buyer fee, WHL testing — control case
+  "ord-197": { // 50/50 fee split, single 100% milestone on PASS only, longer inspection window
+    status: "DRAFT",
+    conditionsOverride: {
+      feeSharingLabel: "50% Buyer / 50% Seller", inspectionPeriod: "10 business days",
+      releaseMilestones: [{ percent: 100, trigger: "On supplier self-test PASS report" }],
+    },
+  },
+  "ord-198": { // 3-way milestone split, fee entirely on the seller, FedEx forwarder, longer ship window
+    status: "DRAFT",
+    conditionsOverride: {
+      forwarder: "FedEx", forwarderAccountNo: "FDX-ACC-55710 (demo)", shipWithinDays: "14 business days",
+      feeSharingLabel: "0% Buyer / 100% Seller",
+      releaseMilestones: [
+        { percent: 20, trigger: "On shipment to WHL for testing" },
+        { percent: 30, trigger: "On WHL goods-received confirmation" },
+        { percent: 50, trigger: "On WHL PASS report" },
+      ],
+    },
+  },
+  "ord-199": { // no testing agreed — single milestone on hub receipt, fee flipped onto the seller, short return window
+    status: "DRAFT",
+    conditionsOverride: {
+      feeSharingLabel: "0% Buyer / 100% Seller", returnCondition: "10 business days, shipping fees to Seller",
+      releaseMilestones: [{ percent: 100, trigger: "On goods received (no testing agreed)" }],
+    },
+  },
+  "ord-200": { // fast turnaround: 70/30 fee, 3-day ship / 2-day inspection, even 50/50 milestone split
+    status: "DRAFT",
+    conditionsOverride: {
+      shipWithinDays: "3 business days", inspectionPeriod: "2 business days", feeSharingLabel: "70% Buyer / 30% Seller",
+      releaseMilestones: [{ percent: 50, trigger: "On shipment to WHL for testing" }, { percent: 50, trigger: "On WHL PASS report" }],
+    },
+  },
+};
 
 export function getOrderBundle(id: string): OrderBundle | undefined {
   const o = ORDERS.find((x) => x.id === id);
@@ -567,21 +930,112 @@ export function getOrderBundle(id: string): OrderBundle | undefined {
       documents: HERO_DOCS, approvals: HERO_APPROVALS, events: HERO_EVENTS,
     };
   }
-  const escrow0: Escrow | undefined = o.paymentMode === "ESCROW"
-    ? { id: `${o.id}-esc`, provider: "HKIN", externalRef: o.id === "ord-153" ? "ES2607-6120" : "—", currency: o.currency, materialAmount: o.buyTotal,
-        chargesAmount: Math.round(o.buyTotal * 0.02), bankingCharges: Math.round(o.buyTotal * 0.005), feeSeller: 300, feeBuyer: 150,
-        superInvoiceTotal: Math.round(o.buyTotal * 1.025) + 450, releaseTrigger: o.termsConditions?.length ? "Per T&C + lab PASS" : "WHL PASS",
-        paymentTerms: o.terms?.paymentMethod ?? "Advance via T/T into escrow", expiryDate: addDays(o.createdAt, 45),
-        status: o.status === "CLOSED" ? "RELEASED" : o.status === "ON_HOLD" ? "FUNDED" : "OPEN", events: [] }
+  // every other order carries a hardcoded detail seed too (see order-details.ts), so the
+  // testing/payments/shipments/customs/delivery/docs screens all have real data. Escrow itself is
+  // never seeded there — it's always built below from the 8-state machine + milestone logic, so a
+  // rich order-details.ts entry and a fully-modelled escrow order compose cleanly on the same order.
+  const d = ORDER_DETAILS[o.id];
+
+  const approvals: Approval[] = o.approvalStatus === "PENDING"
+    ? [{ id: `${o.id}-ap`, subjectType: "ORDER", kind: "PO_REVIEW", role: "Finance", status: "PENDING", notes: "Awaiting review." }]
+    : o.approvalStatus === "APPROVED"
+    ? [{ id: `${o.id}-ap`, subjectType: "ORDER", kind: "PO_REVIEW", role: "Finance", status: "APPROVED", decidedBy: "R. Menon (Finance)" }]
+    : [];
+
+  const scenario = ESCROW_SEED_SCENARIOS[o.id];
+  // CLOSED orders are fully released; ON_HOLD orders are seller-confirmed but not yet invoiced;
+  // explicit E2E-test scenarios (ord-160..170) override both; everything else starts at Draft
+  // (mirrors the strict linear progression — see Escrow spec §3).
+  const escrowStatus: EscrowOrderStatus = scenario?.status
+    ?? (o.status === "CLOSED" ? "RELEASED_TO_SELLER" : o.status === "ON_HOLD" ? "SELLER_CONFIRMED" : "DRAFT");
+  const idx = ESCROW_STATUS_ORDER.indexOf(escrowStatus);
+  const hasInvoice = idx >= ESCROW_STATUS_ORDER.indexOf("ESCROW_FEE_INVOICED");
+  // Reaching T/T Payment Received (or later) means the SC→Finance→HKin payment chain already ran.
+  const paymentDone = idx >= ESCROW_STATUS_ORDER.indexOf("TT_PAYMENT_RECEIVED");
+  const baseFeeToBuyer = Math.round(o.buyTotal * 0.00856); // matches escrow-agent's base fee rate
+  const invoiceFeeToBuyer = scenario?.feeMismatch ? Math.round(baseFeeToBuyer * 1.25) : baseFeeToBuyer;
+  const escrowFees: EscrowFeeBreakdown = { poTotal: o.buyTotal, feeToBuyer: invoiceFeeToBuyer, wiringFeeToBuyer: Math.round(o.buyTotal * 0.0057), feeToSeller: 0, wiringFeeToSeller: 0 };
+  const invoiceDocNo = `AE${o.createdAt.replace(/-/g, "").slice(2, 6)}-${o.id.toUpperCase()}`;
+  const closureDocNo = `PC${o.createdAt.replace(/-/g, "").slice(2, 6)}-${o.id.toUpperCase()}`;
+  const finalVerdict: WhlVerdict | undefined = scenario?.whlVerdict ?? (escrowStatus === "RELEASED_TO_SELLER" ? "PASS" : undefined);
+  // Agreed at PO-drafting time — exists from Draft onward, regardless of whether an invoice has
+  // arrived yet. Different test scenarios demonstrate their own fee-sharing / milestone / period
+  // profile via conditionsOverride; the invoice below (once it arrives) quotes these same terms.
+  const mergedConditions: EscrowConditions = {
+    forwarder: "DHL", forwarderAccountNo: "DHL-ACC-88213 (demo)", shipWithinDays: "7 business days", inspectionPeriod: "5 business days",
+    feeSharingLabel: "100% Buyer / 0% Seller", returnCondition: "7 business days, shipping fees to Seller",
+    releaseMilestones: [{ percent: 30, trigger: "On shipment to WHL for testing" }, { percent: 70, trigger: "On WHL PASS report" }],
+    ...scenario?.conditionsOverride,
+  };
+
+  // Seeds each milestone's send/confirm state from whether its own trigger is already met at the
+  // seeded status — same classification checkEscrowInbox/escrowMilestoneTriggerMet use (ship /
+  // pass-report / receipt). The LAST milestone is deliberately left pending (even if its trigger is
+  // met) so release-ready scenarios still have one real action for the user to walk through by hand.
+  const milestoneReleases: MilestoneRelease[] = mergedConditions.releaseMilestones
+    .map((m, i): MilestoneRelease | undefined => {
+      const t = m.trigger.toLowerCase();
+      const met = t.includes("ship") ? idx >= ESCROW_STATUS_ORDER.indexOf("GOODS_SHIPPED")
+        : (t.includes("pass") || t.includes("report")) ? finalVerdict === "PASS"
+        : t.includes("receiv") ? idx >= ESCROW_STATUS_ORDER.indexOf("RECIPIENT_INSPECTION")
+        : false;
+      const isLast = i === mergedConditions.releaseMilestones.length - 1;
+      if (escrowStatus !== "RELEASED_TO_SELLER" && (!met || isLast)) return undefined;
+      const at = addDays(o.createdAt, 6 + i);
+      return { index: i, instructedAt: at, confirmedAt: at };
+    })
+    .filter((r): r is MilestoneRelease => !!r);
+
+  const escrow: Escrow | undefined = o.paymentMode === "ESCROW"
+    ? {
+        id: `${o.id}-esc`, status: escrowStatus,
+        buyerContact: { company: o.maskingEntity, registeredAddress: "New Delhi, Delhi, India (masking entity — on file)", country: "India", contactPerson: "SC Ops Desk", email: "scops@sharpbuy.demo", phone: "—", im: "—" },
+        sellerContact: { company: o.supplier.name, registeredAddress: "Address on file", country: o.supplier.country, contactPerson: "Sales (TBD)", email: "—", phone: "—", im: "—" },
+        poAmount: o.buyTotal, currency: o.currency,
+        useInspectionService: testingModeOf(o) === "WHL",
+        recipient: { company: o.terms?.labLocation ?? "Independent test lab (TBD)", registeredAddress: "Address on file", country: "—", contactPerson: "Lab Coordinator (TBD)", email: "—", phone: "—", im: "—" },
+        agreedFeeToBuyer: baseFeeToBuyer,
+        agreedConditions: mergedConditions,
+        invoice: hasInvoice ? {
+          invoiceNo: invoiceDocNo, receivedAt: addDays(o.createdAt, 4),
+          fees: escrowFees,
+          conditions: mergedConditions,
+          bankAccount: DEMO_ESCROW_BANK_ACCOUNT,
+        } : undefined,
+        paymentClosure: escrowStatus === "RELEASED_TO_SELLER" ? {
+          documentNo: closureDocNo, releasedAmount: o.buyTotal, receivedAt: addDays(o.createdAt, 10),
+        } : undefined,
+        paymentInstructedAt: paymentDone ? addDays(o.createdAt, 4) : undefined,
+        financeConfirmedAt: paymentDone ? addDays(o.createdAt, 4) : undefined,
+        financeUtr: paymentDone ? `UTR${o.createdAt.replace(/-/g, "")}${o.id.toUpperCase()}` : undefined,
+        paymentSentToHkinAt: paymentDone ? addDays(o.createdAt, 5) : undefined,
+        whlGoodsReceivedAt: idx >= ESCROW_STATUS_ORDER.indexOf("RECIPIENT_INSPECTION") ? addDays(o.createdAt, 8) : undefined,
+        whlVerdict: finalVerdict,
+        whlVerdictAt: finalVerdict ? addDays(o.createdAt, 9) : undefined,
+        whlReportRef: finalVerdict ? `WHL-RPT-${o.id.toUpperCase()}-SEED` : undefined,
+        refundRequestedAt: scenario?.refundRequested || scenario?.refundInstructed ? addDays(o.createdAt, 10) : undefined,
+        refundInstructedAt: scenario?.refundInstructed ? addDays(o.createdAt, 11) : undefined,
+        milestoneReleases,
+        cancelledAt: scenario?.cancelled ? o.createdAt : undefined,
+        agentEmails: [],
+      }
     : undefined;
 
-  // every other order carries a hardcoded detail seed too (see order-details.ts), so
-  // each screen — testing, payments, shipments, customs, delivery, docs — has real data
-  const d = ORDER_DETAILS[o.id];
+  const escrowDocs: DocumentRef[] = [];
+  if (escrow?.invoice) escrowDocs.push({ id: `${o.id}-ei`, subjectType: "ESCROW", docType: "ESCROW_INVOICE", fileName: `${escrow.invoice.invoiceNo}.pdf`, uploadedBy: "Escrow Agent", uploadedAt: escrow.invoice.receivedAt });
+  if (escrow?.whlReportRef) escrowDocs.push({ id: `${o.id}-wr`, subjectType: "LOT", docType: "WHL_REPORT", fileName: `${escrow.whlReportRef}.pdf`, uploadedBy: "WHL", uploadedAt: escrow.whlVerdictAt! });
+  if (escrow?.paymentClosure) escrowDocs.push({ id: `${o.id}-pc`, subjectType: "ESCROW", docType: "PAYMENT_CLOSURE", fileName: `${escrow.paymentClosure.documentNo}.pdf`, uploadedBy: "Escrow Agent", uploadedAt: escrow.paymentClosure.receivedAt });
+
+  // Only seeded when the scenario needs a "release via inbound AWB" demo (no testing agreed on the PO).
+  const shipments: Shipment[] = scenario?.seedInboundAwb ? [
+    { id: `${o.id}-shp1`, shipmentNo: `SHP-IN-${o.id.toUpperCase()}-1`, leg: "INBOUND", awb: `DHL ${o.id.replace(/\D/g, "")}0011`, carrier: "DHL",
+      fromLocation: o.supplier.country, toLocation: "1Buy hub — New Delhi", boxCount: 2, grossWeightKg: 12.4,
+      dispatchDate: addDays(o.createdAt, 9), status: "IN_TRANSIT", lines: [{ mpn: "STM32F407VGT6", qty: 500 }] },
+  ] : [];
+
   if (d) {
     return {
-      ...base, lines: d.lines, lots: d.lots, mpnTests: d.mpnTests, labEmails: d.labEmails,
-      escrow: escrow0 ? { ...escrow0, ...d.escrow, events: d.escrow?.events ?? escrow0.events } : undefined,
+      ...base, lines: d.lines, lots: d.lots, mpnTests: d.mpnTests, labEmails: d.labEmails, escrow,
       payments: d.payments, shipments: d.shipments, customs: d.customs, deliveries: d.deliveries,
       sourcingAllocations: d.sourcingAllocations, documents: d.documents, approvals: d.approvals,
       events: d.events, einvoice: d.einvoice,
@@ -589,14 +1043,9 @@ export function getOrderBundle(id: string): OrderBundle | undefined {
     };
   }
 
-  const approvals: Approval[] = o.approvalStatus === "PENDING"
-    ? [{ id: `${o.id}-ap`, subjectType: "ORDER", kind: "PO_REVIEW", role: "Finance", status: "PENDING", notes: "Awaiting review." }]
-    : o.approvalStatus === "APPROVED"
-    ? [{ id: `${o.id}-ap`, subjectType: "ORDER", kind: "PO_REVIEW", role: "Finance", status: "APPROVED", decidedBy: "R. Menon (Finance)" }]
-    : [];
   return {
-    ...base, lots: [], mpnTests: [], labEmails: [], escrow: escrow0, payments: [], shipments: [], customs: [], deliveries: [], sourcingAllocations: [],
-    documents: [{ id: `${o.id}-po`, subjectType: "ORDER", docType: "PO", fileName: `buyer-po-${o.orderNo}.pdf`, uploadedBy: o.createdBy, uploadedAt: o.createdAt }],
+    ...base, lots: [], escrow, payments: [], shipments, customs: [], deliveries: [], sourcingAllocations: [],
+    documents: [{ id: `${o.id}-po`, subjectType: "ORDER", docType: "PO", fileName: `buyer-po-${o.orderNo}.pdf`, uploadedBy: o.createdBy, uploadedAt: o.createdAt }, ...escrowDocs],
     approvals, events: [],
   };
 }

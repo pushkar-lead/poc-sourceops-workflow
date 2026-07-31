@@ -22,7 +22,7 @@ export function FormTabBar<T extends string>({
   tabs, active, onChange,
 }: { tabs: { id: T; label: string; invalid?: boolean }[]; active: T; onChange: (t: T) => void }) {
   return (
-    <div className="flex gap-1.5 overflow-x-auto border-b">
+    <div className="no-scrollbar flex gap-1.5 overflow-x-auto border-b">
       {tabs.map((t) => (
         <button key={t.id} type="button" onClick={() => onChange(t.id)}
           className={cn("-mb-px inline-flex items-center gap-1.5 whitespace-nowrap rounded-t-lg border-b-2 px-4 py-2 text-sm transition",
@@ -143,7 +143,7 @@ export function DataTable<T>({
     return <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">{empty}</div>;
   }
   return (
-    <div className="overflow-x-auto rounded-lg border">
+    <div className="no-scrollbar overflow-x-auto rounded-lg border">
       <table className="w-full min-w-[520px] border-collapse text-sm">
         <thead>
           <tr className="border-b bg-card-2">

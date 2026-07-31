@@ -34,6 +34,7 @@ export default function TestingPage() {
         </Panel>
       )}
 
+
       <Panel>
         {rows.length === 0 ? <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">No lots yet.</div> : (
           <div className="space-y-2">

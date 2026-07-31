@@ -60,3 +60,8 @@ body {
 }
 ::selection { background: var(--accent-soft); }
 .tnum { font-variant-numeric: tabular-nums; }
+
+/* Keep horizontal scroll working (drag/swipe/wheel) without the browser's native scrollbar chrome —
+   used on tab bars and step strips where the affordance is the content itself, not a scrollbar. */
+.no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }

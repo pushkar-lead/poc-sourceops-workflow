@@ -17,6 +17,7 @@ import {
   AddStepModal, AddLotModal, EscrowAmountModal, ExtendEscrowModal, AddPaymentModal, CreateShipmentModal,
   FileBOEModal, AllocateDeliveryModal, AddEventModal, UploadDocModal, AddAllocationModal, UploadPIModal,
 } from "@/components/order/modals";
+import { TestingTab } from "@/components/order/testing-tab";
 
 type ModalKey = null | "addStep" | "addLot" | "fund" | "release" | "refund" | "extend" | "addPayment" | "shipment" | "boe" | "allocate" | "event" | "doc" | "pi";
 
@@ -352,51 +353,6 @@ function JourneyTab({ b, id, onAdd }: { b: OrderBundle; id: string; onAdd: () =>
           );
         })}
       </ol>
-    </Panel>
-  );
-}
-
-function TestingTab({ b, id, onAdd, onRelease, onRefund, onExtend }: { b: OrderBundle; id: string; onAdd: () => void; onRelease: () => void; onRefund: () => void; onExtend: () => void }) {
-  const setLotStatus = useStore((s) => s.setLotStatus);
-  const fetchLabResult = useStore((s) => s.fetchLabResult);
-  const hasFail = b.lots.some((l) => l.testStatus === "FAIL");
-  const hasPass = b.lots.some((l) => l.testStatus === "PASS");
-  const canRelease = !!b.escrow && escrowRemaining(b) > 0;
-  const pendingExt = b.escrow?.extensions?.some((x) => x.status === "REQUESTED");
-  return (
-    <Panel title="Testing — per MPN × lot"
-      actions={<Button variant="outline" onClick={onAdd}><Plus className="h-4 w-4" /> Add lot</Button>}>
-      {hasPass && canRelease && (
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[color-mix(in_srgb,var(--ok)_40%,transparent)] bg-ok-bg p-2.5 text-sm">
-          <span className="text-ok">A lot PASSED — release the escrow tranche to the seller.</span>
-          <div className="flex gap-2">
-            {b.escrow && <Button variant="outline" onClick={onExtend} disabled={pendingExt}>{pendingExt ? "Extension pending…" : "Extend window"}</Button>}
-            <Button onClick={onRelease}>Release escrow</Button>
-          </div>
-        </div>
-      )}
-      {b.lots.length === 0 ? <Empty text="No lots yet — add one to record a WHL / self-test result." /> : (
-        <div className="space-y-2">
-          {b.lots.map((l) => (
-            <div key={l.id} className="flex flex-wrap items-center gap-3 rounded-lg border p-3">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2 text-sm font-medium"><span className="font-mono text-xs">{l.orderLineMpn}</span><span className="text-faint">·</span> {l.lotCode}</div>
-                <div className="text-xs text-muted-foreground">{l.lab ?? "—"} · WO {l.workOrderNo ?? "—"} · report {l.reportNo ?? "—"} · sample {l.sampleQty}/{qtyfmt(l.qty)}</div>
-              </div>
-              <StatusPill status={l.testStatus} />
-              <div className="flex flex-wrap items-center gap-1">
-                {l.workOrderNo && <button onClick={() => fetchLabResult(id, l.id)} className="rounded-md border border-primary/50 bg-accent-soft px-2 py-1 text-xs font-medium text-primary hover:border-primary" title={`WHL work order ${l.workOrderNo}`}>Fetch WHL</button>}
-                <span className="mx-1 text-[10px] uppercase tracking-wide text-faint">or set</span>
-                {(["PASS", "MAYBE", "FAIL"] as const).map((st) => (
-                  <button key={st} onClick={() => setLotStatus(id, l.id, st)}
-                    className={cn("rounded-md border px-2 py-1 text-xs font-medium hover:border-primary", l.testStatus === st && "border-primary bg-accent-soft text-primary")}>{st}</button>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-      {b.paymentMode === "ESCROW" && <p className="mt-3 text-xs text-muted-foreground">A <b className="text-ok">PASS</b> releases the escrow tranche; a <b className="text-bad">FAIL</b> starts the return/refund path.{hasFail && <> <button onClick={onRefund} className="text-primary hover:underline">Refund escrow →</button></>}</p>}
     </Panel>
   );
 }

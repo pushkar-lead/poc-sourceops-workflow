@@ -8,6 +8,16 @@ export type TradeType = "DOMESTIC" | "INTERNATIONAL";
 export type PaymentMode = "ADVANCE" | "ESCROW" | "CREDIT";
 export type TestingMode = "NONE" | "SUPPLIER_SELF" | "WHL";
 export type TestStatus = "PENDING" | "PASS" | "FAIL" | "MAYBE";
+// per-test (process) status on a lot — WHL's own vocabulary, incl. F.A.R. (Further Analysis Recommended)
+export type TestProcessStatus = "PENDING" | "IN_PROGRESS" | "PASSED" | "FAILED" | "NOT_CONDUCTED" | "FAR";
+// WHL report verdicts: per-process result and the report's overall conclusion
+export type WhlProcessResult = "ACCEPTABLE" | "NOT_ACCEPTABLE" | "FAR" | "NOT_CONDUCTED";
+export type WhlConclusion = "ACCEPTABLE" | "NOT_ACCEPTABLE" | "SUSPECT_COUNTERFEIT";
+// where a test requirement came from: parsed off the PO, or hand-added by an operator
+export type TestSource = "AUTO_PO" | "MANUAL";
+export type AutofillState = "PENDING" | "OK" | "FAILED";
+export type LabEmailDirection = "OUT" | "IN";
+export type LabEmailStatus = "AWAITING_RESPONSE" | "UPDATE_RECEIVED" | "REPORT_DELIVERED" | "ESCALATED" | "SENT";
 export type ShipmentLeg = "INBOUND" | "OUTBOUND";
 export type ShipmentStatus =
   | "PLANNED" | "DISPATCHED" | "IN_TRANSIT" | "AT_CUSTOMS" | "ARRIVED" | "DELIVERED" | "CANCELLED";
@@ -150,6 +160,137 @@ export interface OrderLine {
   lab?: string;
 }
 
+// ---- WHL testing: PO → MPN → Lot → Test → status history → report (versioned) → email thread ----
+
+/** One audit row. Every manual test edit and every status change (automated or manual) writes one. */
+export interface TestAuditEntry {
+  id: string;
+  at: string;                 // ISO datetime
+  by: string;                 // operator or the automation that did it ("WHL inbox (auto)")
+  action: "AUTOFILL" | "ADD" | "DELETE" | "STATUS" | "REPORT" | "RECONCILE" | "EMAIL";
+  target?: string;            // test name / report no / lot code the row is about
+  before?: string;
+  after?: string;
+  note?: string;
+  sourceEmailId?: string;     // inbound email that triggered an automated change
+}
+
+/** A required test as parsed off the PO (never hand-typed unless the operator overrides). */
+export interface TestRequirement {
+  id: string;
+  name: string;               // e.g. "External Visual Inspection"
+  standard?: string;          // e.g. "AS6081"
+  source: TestSource;
+  addedBy?: string;
+  addedAt?: string;
+}
+
+/**
+ * Test requirements for ONE MPN on ONE order (i.e. per PO). The same MPN can carry a
+ * different list on another PO/lot, so this is keyed by order + mpn, never globally by mpn.
+ */
+export interface MpnTestSpec {
+  id: string;
+  mpn: string;
+  autofill: AutofillState;    // FAILED → "needs manual review" flag on the MPN
+  autofillNote?: string;      // why it failed (bad scan / no test table / unparseable)
+  sourceDoc?: string;         // which PO the tests were parsed from
+  parsedAt?: string;
+  confidence?: number;
+  tests: TestRequirement[];
+  audit: TestAuditEntry[];
+}
+
+/** Live status of one required test on one lot, with its full progression. */
+export interface LotTest {
+  id: string;
+  requirementId?: string;     // links back to the MpnTestSpec entry it was inherited from
+  name: string;
+  standard?: string;
+  source: TestSource;
+  status: TestProcessStatus;
+  acceptQty?: number;
+  rejectQty?: number;
+  updatedAt?: string;
+  history: TestAuditEntry[];  // timestamped progression, not just the latest state
+}
+
+/** One version of a WHL report (WHL revises: 352146.1, 352146.2 …). */
+export interface WhlReportProcess {
+  name: string;
+  result: WhlProcessResult;
+  acceptQty?: number;
+  rejectQty?: number;
+  note?: string;
+}
+
+export interface WhlReport {
+  id: string;
+  reportNo: string;           // incl. revision, e.g. "352146.2"
+  revision: number;
+  reportDate: string;
+  workOrderNo: string;
+  fileName: string;
+  receivedAt: string;
+  current: boolean;           // exactly one current version per lot
+  revisionNote?: string;
+  // auto-parsed header fields (surfaced on screen — no need to open the PDF)
+  partNumber: string;
+  manufacturer: string;
+  lotQty: number;
+  client: string;
+  clientPo: string;           // may come back as "PO Unknown" → reconciliation flag
+  conclusion: WhlConclusion;
+  anyFar: boolean;            // a process came back F.A.R. even if the overall conclusion is Acceptable
+  processes: WhlReportProcess[];
+  approvedBy: string;
+  approverTitle: string;
+  standards: string[];        // e.g. ["AS6081", "AS6171"]
+  riskClass?: string;         // e.g. "ERAI Low Risk"
+  msl?: string;
+  packageType?: string;
+  confidentialityNote?: string;
+  parseFlags: string[];       // missing/placeholder data needing manual reconciliation
+  accessLog: { at: string; by: string; action: "VIEW" | "DOWNLOAD" }[];
+}
+
+/** One message in the WHL correspondence thread for a lot. */
+export interface LabEmail {
+  id: string;
+  direction: LabEmailDirection;
+  lotId?: string;             // undefined = couldn't be matched → manual-match queue
+  lotCode?: string;
+  mpn?: string;
+  workOrderNo?: string;
+  poNo?: string;
+  subject: string;
+  body: string;
+  at: string;
+  by: string;                 // sender ("You (demo)" / "WHL Reports")
+  status: LabEmailStatus;
+  kind: "REQUEST_UPDATE" | "CUSTOM" | "STATUS_UPDATE" | "REPORT" | "ESCALATION";
+  attachments?: string[];
+  matchedBy?: string;         // set when an operator resolved it out of the manual-match queue
+  matchNote?: string;         // why auto-matching failed
+}
+
+/** Who we notify once a lot's result is in. Buyer/supplier mails stay masked from each other. */
+export type NotifyParty = "SUPPLIER" | "BUYER" | "ESCROW" | "WHL";
+
+export interface LotNotification {
+  id: string;
+  party: NotifyParty;
+  to: string;
+  subject: string;
+  body: string;
+  attachments?: string[];   // the report PDF when the operator chose to attach it
+  reportNo?: string;        // which report version the notification was about
+  at: string;
+  by: string;
+  status: "SENT" | "FAILED";
+  note?: string;            // failure reason / masking or NDA caveat recorded at send time
+}
+
 export interface Lot {
   id: string;
   orderLineMpn: string;
@@ -160,9 +301,14 @@ export interface Lot {
   testStatus: TestStatus;
   lab?: string;
   workOrderNo?: string;
-  reportNo?: string;
+  reportNo?: string;          // current report no (incl. revision)
   tatDays?: number;
   testedAt?: string;
+  clientPoNo?: string;        // client PO this lot's demand belongs to (report reconciliation)
+  tests?: LotTest[];          // inherited from the MPN's spec at lot creation
+  reports?: WhlReport[];      // all versions; exactly one `current`
+  lastUpdateRequestAt?: string; // SLA clock for an unanswered "Request Update"
+  notifications?: LotNotification[]; // result circulated to supplier / buyer / escrow / WHL
 }
 
 export interface JourneyStep {
@@ -336,6 +482,8 @@ export interface OrderBundle extends Order {
   lines: OrderLine[];
   journey: JourneyStep[];
   lots: Lot[];
+  mpnTests?: MpnTestSpec[];   // PO-parsed test requirements per MPN on this order
+  labEmails?: LabEmail[];     // full WHL correspondence (incl. unmatched inbound)
   escrow?: Escrow;
   payments: Payment[];
   shipments: Shipment[];

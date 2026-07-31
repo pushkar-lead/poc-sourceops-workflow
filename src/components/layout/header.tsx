@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Search, Plus, RotateCcw, Menu } from "lucide-react";
 import { ROLES, type Role } from "@/data/enums";
+import { setActiveRole, ROLE_STORAGE_KEY } from "@/lib/role";
 import { Button } from "@/components/ui/primitives";
 import { useStore } from "@/store/store";
 import { cn } from "@/lib/utils";
@@ -25,13 +26,13 @@ export function Header({ onMenu }: { onMenu: () => void }) {
 
   useEffect(() => {
     document.documentElement.classList.remove("dark"); // POC is light-theme only
-    const r = localStorage.getItem("poc-role") as Role | null;
+    const r = localStorage.getItem(ROLE_STORAGE_KEY) as Role | null;
     if (r) setRole(r);
   }, []);
 
   function pickRole(r: Role) {
     setRole(r);
-    localStorage.setItem("poc-role", r);
+    setActiveRole(r); // persists + notifies permission-gated screens (e.g. WHL testing)
     router.push(ROLE_HOME[r]);
   }
 

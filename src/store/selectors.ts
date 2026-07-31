@@ -1,5 +1,6 @@
-import type { OrderBundle, JourneyStep, ClientPO, SupplierPO } from "@/types";
+import type { OrderBundle, JourneyStep, ClientPO, SupplierPO, Lot, LotTest, WhlReport } from "@/types";
 import { toUSD } from "@/lib/fx";
+import { WHL_SLA_BUSINESS_DAYS } from "@/data/enums";
 
 export type OrdersMap = Record<string, OrderBundle>;
 
@@ -79,6 +80,122 @@ export function gateReason(b: OrderBundle, step: JourneyStep): string | null {
     return b.lines.every((l) => unmappedForOrderLine(b, l) === 0) ? null : "Not all order lines are mapped to a client PO yet (Allocations tab).";
   }
   return null; // manual gate (e.g. Supplier ACK + PI)
+}
+
+// ---- WHL testing: per-MPN specs, per-lot trackers, reports, correspondence ----
+
+export const specForMpn = (b: OrderBundle, mpn: string) => (b.mpnTests ?? []).find((s) => s.mpn === mpn);
+
+/** Tests done / total on a lot (F.A.R. and Not Conducted are NOT done — they need follow-up). */
+export function lotTestProgress(lot: Lot) {
+  const tests = lot.tests ?? [];
+  const settled = tests.filter((t) => t.status === "PASSED").length;
+  return { total: tests.length, settled, far: tests.filter((t) => t.status === "FAR").length,
+    failed: tests.filter((t) => t.status === "FAILED").length,
+    open: tests.filter((t) => t.status === "PENDING" || t.status === "IN_PROGRESS").length,
+    notConducted: tests.filter((t) => t.status === "NOT_CONDUCTED").length };
+}
+
+export const currentReport = (lot: Lot): WhlReport | undefined =>
+  (lot.reports ?? []).find((r) => r.current) ?? (lot.reports ?? []).slice().sort((a, c) => c.revision - a.revision)[0];
+
+export const lotEmails = (b: OrderBundle, lotId: string) =>
+  (b.labEmails ?? []).filter((m) => m.lotId === lotId);
+
+/** Inbound mail the platform couldn't route to a lot — must be matched by hand, never dropped. */
+export const unmatchedEmails = (b: OrderBundle) => (b.labEmails ?? []).filter((m) => m.direction === "IN" && !m.lotId);
+
+/** MPNs whose PO parse failed or was never run — "needs manual review". */
+export function testAutofillGaps(b: OrderBundle) {
+  const testable = b.lines.filter((l) => l.testingMode !== "NONE");
+  return testable
+    .map((l) => ({ mpn: l.mpn, spec: specForMpn(b, l.mpn) }))
+    .filter((x) => !x.spec || x.spec.autofill === "FAILED" || x.spec.tests.length === 0);
+}
+
+const businessDaysSince = (iso: string) => {
+  const from = new Date(`${iso}T00:00:00`);
+  const to = new Date();
+  let d = 0;
+  for (const t = new Date(from); t < to; t.setDate(t.getDate() + 1)) {
+    const day = t.getDay();
+    if (day !== 0 && day !== 6) d++;
+  }
+  return Math.max(0, d - 1);
+};
+
+/** "Request Update" sent and still unanswered past the SLA → chase / escalate. */
+export function overdueUpdateRequests(b: OrderBundle) {
+  return b.lots
+    .filter((l) => !!l.lastUpdateRequestAt)
+    .map((l) => ({ lot: l, days: businessDaysSince(l.lastUpdateRequestAt!) }))
+    .filter((x) => x.days >= WHL_SLA_BUSINESS_DAYS);
+}
+
+/** Report-vs-order mismatches surfaced automatically (MPN, client PO, missing data). */
+export function reconciliationAlerts(b: OrderBundle) {
+  const out: { lotId: string; lotCode: string; reportNo: string; reportId: string; message: string; kind: "PO" | "MPN" | "DATA" }[] = [];
+  for (const lot of b.lots) {
+    for (const r of lot.reports ?? []) {
+      if (!r.current) continue;
+      for (const f of r.parseFlags) {
+        const kind = f.toLowerCase().includes("client p/o") ? "PO" : f.toLowerCase().includes("mpn") ? "MPN" : "DATA";
+        out.push({ lotId: lot.id, lotCode: lot.lotCode, reportNo: r.reportNo, reportId: r.id, message: f, kind });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Roll-up for the tab header. Pass a lotId to scope every number to one lot
+ * (the "view this lot's result" filter); omit it for the order-wide total.
+ * Unmatched inbound mail stays order-wide — it isn't attached to a lot yet.
+ */
+export function testingSummary(b: OrderBundle, lotId?: string) {
+  const lots = lotId ? b.lots.filter((l) => l.id === lotId) : b.lots;
+  const mpns = new Set(lots.map((l) => l.orderLineMpn));
+  const tests = lots.flatMap((l) => l.tests ?? []) as LotTest[];
+  const emails = (b.labEmails ?? []).filter((m) => (lotId ? m.lotId === lotId : true));
+  return {
+    lots: lots.length,
+    tests: tests.length,
+    passed: tests.filter((t) => t.status === "PASSED").length,
+    far: tests.filter((t) => t.status === "FAR").length,
+    failed: tests.filter((t) => t.status === "FAILED").length,
+    notConducted: tests.filter((t) => t.status === "NOT_CONDUCTED").length,
+    open: tests.filter((t) => t.status === "PENDING" || t.status === "IN_PROGRESS").length,
+    reports: lots.reduce((a, l) => a + (l.reports?.length ?? 0), 0),
+    awaiting: emails.filter((m) => m.status === "AWAITING_RESPONSE").length,
+    unmatched: unmatchedEmails(b).length,
+    gaps: testAutofillGaps(b).filter((g) => !lotId || mpns.has(g.mpn)).length,
+    overdue: overdueUpdateRequests(b).filter((o) => !lotId || o.lot.id === lotId).length,
+  };
+}
+
+/** One row per lot for the lot-wise results table: verdict, test tally, current report. */
+export function lotResults(b: OrderBundle) {
+  return b.lots.map((lot) => {
+    const p = lotTestProgress(lot);
+    const report = currentReport(lot);
+    const overdue = overdueUpdateRequests(b).find((o) => o.lot.id === lot.id);
+    return {
+      lot,
+      progress: p,
+      pct: p.total ? Math.round((p.settled / p.total) * 100) : 0,
+      report,
+      revisions: lot.reports?.length ?? 0,
+      awaiting: lotEmails(b, lot.id).filter((m) => m.direction === "OUT" && m.status === "AWAITING_RESPONSE").length,
+      overdueDays: overdue?.days ?? 0,
+      // what still blocks this lot from being releasable, in one phrase
+      blocker: p.failed > 0 ? "not-acceptable result"
+        : p.far > 0 ? "F.A.R. — needs follow-up"
+        : p.notConducted > 0 ? "process not conducted"
+        : p.total === 0 ? "no tests on file"
+        : p.open > 0 ? `${p.open} test(s) still open`
+        : null,
+    };
+  });
 }
 
 // ---- cross-order rollups (queues + boards) ----

@@ -1,6 +1,6 @@
 import { mockCall, ref, pickWeighted } from "@/integrations/mock-client";
-import { WHL_PROCESSES, WHL_CONTACT, WHL_CONFIDENTIALITY } from "@/data/enums";
-import type { TestStatus, WhlConclusion, WhlProcessResult, TestProcessStatus } from "@/types";
+import { WHL_PROCESSES, WHL_CONTACT, WHL_CONFIDENTIALITY, stageIdx } from "@/data/enums";
+import type { TestStatus, WhlConclusion, WhlProcessResult, TestProcessStatus, TestingStage } from "@/types";
 
 const SYS = "whl";
 const LABEL = "WHL Lab";
@@ -117,7 +117,7 @@ export function whlSendMail(req: WhlSendMailReq) {
 
 // ---- inbound mail (status updates, delay notices, revised reports) ----
 
-export type WhlInboundKind = "STATUS_UPDATE" | "REPORT" | "DELAY" | "AMBIGUOUS";
+export type WhlInboundKind = "STATUS_UPDATE" | "REPORT" | "DELAY" | "AMBIGUOUS" | "RECEIPT";
 export interface WhlInboundMail {
   messageId: string;
   kind: WhlInboundKind;
@@ -129,12 +129,17 @@ export interface WhlInboundMail {
   workOrderNo?: string;
   lotCode?: string;
   reportNo?: string;
+  /** the lifecycle stage this mail moves the lot into (absent = no stage change) */
+  stage?: TestingStage;
   // per-test status updates carried by the mail
   testUpdates?: { name: string; status: TestProcessStatus; note?: string }[];
   attachments?: string[];
 }
 
-export interface WhlPollInboxReq { workOrders: { workOrderNo: string; lotCode: string; mpn: string; testNames: string[] }[] }
+export interface WhlPollInboxReq {
+  /** `stage` lets the mock answer with the mail that plausibly comes next for that lot. */
+  workOrders: { workOrderNo: string; lotCode: string; mpn: string; testNames: string[]; stage?: TestingStage }[];
+}
 
 /**
  * Poll the WHL mailbox. Returns interim status notes, delay notices and report
@@ -148,43 +153,121 @@ export function whlPollInbox(req: WhlPollInboxReq) {
       if (req.workOrders.length === 0) return { messages: [] };
       const messages: WhlInboundMail[] = [];
       for (const wo of req.workOrders) {
-        const kind = pickWeighted<WhlInboundKind>([["STATUS_UPDATE", 45], ["REPORT", 25], ["DELAY", 15], ["AMBIGUOUS", 15]]);
-        if (kind === "AMBIGUOUS") {
+        // ~15% of real lab mail arrives with a subject line nothing can be matched on.
+        // Keep producing those regardless of stage — the manual-match queue exists for them.
+        if (Math.random() < 0.15) {
           messages.push({
-            messageId: ref("IN"), kind, from: WHL_CONTACT, receivedAt: now,
+            messageId: ref("IN"), kind: "AMBIGUOUS", from: WHL_CONTACT, receivedAt: now,
             subject: "RE: Testing update", // no WO / lot / report no → cannot be routed
             body: "Hi, quick update on the parts you sent through — one of the lots needs another day on the electrical bench. Will revert with the report. Regards, WHL",
           });
           continue;
         }
-        if (kind === "REPORT") {
-          messages.push({
-            messageId: ref("IN"), kind, from: WHL_CONTACT, receivedAt: now,
-            subject: `WHL Report ${wo.workOrderNo} — ${wo.mpn} (Lot ${wo.lotCode})`,
-            body: `Please find attached our report for work order ${wo.workOrderNo}. Conclusion and process breakdown are in the attached PDF.`,
-            workOrderNo: wo.workOrderNo, lotCode: wo.lotCode, reportNo: `${wo.workOrderNo}.1`,
-            attachments: [`WHL-${wo.workOrderNo}.1.pdf`],
-          });
-          continue;
-        }
-        const picks = wo.testNames.length ? wo.testNames.slice(0, 2) : ["Electrical Test"];
-        messages.push({
-          messageId: ref("IN"), kind, from: WHL_CONTACT, receivedAt: now,
-          subject: kind === "DELAY"
-            ? `Delay notice — WO ${wo.workOrderNo} / Lot ${wo.lotCode}`
-            : `Interim status — WO ${wo.workOrderNo} / Lot ${wo.lotCode}`,
-          body: kind === "DELAY"
-            ? `Decapsulation bench is backed up; expect ${wo.mpn} (Lot ${wo.lotCode}) to run 2 days past the quoted TAT.`
-            : `${picks.join(" and ")} now underway for ${wo.mpn} (Lot ${wo.lotCode}).`,
-          workOrderNo: wo.workOrderNo, lotCode: wo.lotCode,
-          testUpdates: picks.map((name) => ({
-            name,
-            status: (kind === "DELAY" ? "PENDING" : "IN_PROGRESS") as TestProcessStatus,
-            note: kind === "DELAY" ? "Delayed — bench backlog at WHL" : "Test in progress at WHL",
-          })),
-        });
+        const mail = nextStageMail(wo, now);
+        if (mail) messages.push(mail);
       }
       return { messages };
     },
     { latencyMs: [500, 1500] });
+}
+
+/**
+ * The mail WHL would plausibly send *next*, given where the lot already is. This is
+ * what makes the lifecycle demoable: polling the inbox repeatedly walks a lot along
+ * receipt → started → in progress → report prep → report, one step at a time,
+ * instead of firing a random status mail at a lot that's already finished.
+ */
+function nextStageMail(wo: WhlPollInboxReq["workOrders"][number], now: string): WhlInboundMail | null {
+  const base = {
+    messageId: ref("IN"), from: WHL_CONTACT, receivedAt: now,
+    workOrderNo: wo.workOrderNo, lotCode: wo.lotCode,
+  };
+  const ref0 = `WO ${wo.workOrderNo} / Lot ${wo.lotCode}`;
+  const picks = wo.testNames.length ? wo.testNames.slice(0, 2) : ["Electrical Test"];
+  const at = stageIdx(wo.stage ?? undefined);
+
+  // Nothing has been dispatched yet — the lab chases us, it can't confirm a receipt.
+  if (at < stageIdx("SUPPLIER_DISPATCHING")) {
+    return {
+      ...base, kind: "STATUS_UPDATE",
+      subject: `Awaiting samples — ${ref0}`,
+      body: `We have your work order ${wo.workOrderNo} on file but the samples for ${wo.mpn} (Lot ${wo.lotCode}) have not reached us yet. Please share the dispatch details so we can book the lot in on arrival.`,
+    };
+  }
+
+  // In transit → WHL confirms receipt.
+  if (at < stageIdx("COMPONENTS_RECEIVED")) {
+    return {
+      ...base, kind: "RECEIPT", stage: "COMPONENTS_RECEIVED",
+      subject: `Receipt confirmation — ${ref0}`,
+      body: `This is to confirm receipt of ${wo.mpn} (Lot ${wo.lotCode}) against work order ${wo.workOrderNo}. Quantity and packaging match the submission note; the lot is booked in and queued for the agreed test plan.`,
+    };
+  }
+
+  // Booked in → bench work starts. Deliberately carries no per-test update: marking a
+  // test IN_PROGRESS here would imply "Testing In Progress" and collapse the distinct
+  // "Testing Started" step the lab actually reports. Per-test progress arrives with the
+  // interim mails that follow.
+  if (at < stageIdx("TESTING_STARTED")) {
+    return {
+      ...base, kind: "STATUS_UPDATE", stage: "TESTING_STARTED",
+      subject: `Testing commenced — ${ref0}`,
+      body: `Testing has commenced on ${wo.mpn} (Lot ${wo.lotCode}) against the agreed test plan. We will share interim updates as each process completes.`,
+    };
+  }
+
+  const progressMail = (): WhlInboundMail => ({
+    ...base, kind: "STATUS_UPDATE", stage: "TESTING_IN_PROGRESS",
+    subject: `Interim status — ${ref0}`,
+    body: `${picks.join(" and ")} now underway for ${wo.mpn} (Lot ${wo.lotCode}). No adverse findings to report at this point.`,
+    testUpdates: picks.map((name) => ({ name, status: "IN_PROGRESS" as TestProcessStatus, note: "Test in progress at WHL" })),
+  });
+  const delayMail = (): WhlInboundMail => ({
+    ...base, kind: "DELAY", stage: "TESTING_IN_PROGRESS",
+    subject: `Delay notice — ${ref0}`,
+    body: `Decapsulation bench is backed up; expect ${wo.mpn} (Lot ${wo.lotCode}) to run 2 days past the quoted TAT.`,
+    testUpdates: picks.map((name) => ({ name, status: "PENDING" as TestProcessStatus, note: "Delayed — bench backlog at WHL" })),
+  });
+
+  // Started → the first interim update always lands before the report is compiled, so
+  // the "Testing In Progress" step never gets skipped over.
+  if (at < stageIdx("TESTING_IN_PROGRESS")) {
+    return Math.random() < 0.2 ? delayMail() : progressMail();
+  }
+
+  // Underway → more interim updates (no stage change, but the tracker still moves), an
+  // occasional delay, and eventually the bench work wraps up.
+  if (at < stageIdx("TESTING_COMPLETED")) {
+    const beat = pickWeighted<"PROGRESS" | "DELAY" | "DONE">([["PROGRESS", 30], ["DELAY", 10], ["DONE", 60]]);
+    if (beat === "DELAY") return delayMail();
+    if (beat === "PROGRESS") return progressMail();
+    return {
+      ...base, kind: "STATUS_UPDATE", stage: "TESTING_COMPLETED",
+      subject: `Testing complete — ${ref0}`,
+      body: `All processes in the agreed test plan have now been conducted on ${wo.mpn} (Lot ${wo.lotCode}). Results are with our reviewer; the report follows separately.`,
+    };
+  }
+
+  // Bench work done, write-up outstanding. This is the gap that actually costs time —
+  // the lab is finished but the signed report can sit with a reviewer for days.
+  if (at < stageIdx("REPORT_PREPARATION")) {
+    return {
+      ...base, kind: "STATUS_UPDATE", stage: "REPORT_PREPARATION",
+      subject: `Report in preparation — ${ref0}`,
+      body: `The report for work order ${wo.workOrderNo} is being compiled and is with our laboratory manager for sign-off. We will share the signed PDF as soon as it is released.`,
+    };
+  }
+
+  // Report being written → it arrives.
+  if (at < stageIdx("REPORT_SHARED")) {
+    return {
+      ...base, kind: "REPORT", stage: "REPORT_SHARED", reportNo: `${wo.workOrderNo}.1`,
+      subject: `WHL Report ${wo.workOrderNo} — ${wo.mpn} (Lot ${wo.lotCode})`,
+      body: `Please find attached our report for work order ${wo.workOrderNo}. Conclusion and process breakdown are in the attached PDF. Use "Fetch report" in the portal to parse the results onto the lot.`,
+      attachments: [`WHL-${wo.workOrderNo}.1.pdf`],
+    };
+  }
+
+  // Report already in hand — nothing further unless we ask (re-test, F.A.R. follow-up).
+  return null;
 }

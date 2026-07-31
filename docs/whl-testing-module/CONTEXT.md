@@ -16,16 +16,23 @@ Pair this file with `PROMPT.md` (the instruction to give Claude in the target re
 
 ## 1. What the module does
 
-The primary screen lives on **one order** and answers four questions:
+The primary screen lives on **one order** and answers five questions:
 
 1. **What tests does each MPN need?** — auto-filled by parsing the PO (never hand-typed), with an
    audited manual override and an explicit "auto-fill failed — needs manual review" state.
-2. **Where does every test stand, per lot?** — a live status tracker per MPN × lot × test, updated
+2. **Where is each lot right now, and who owes the next move?** — an 8-stage testing lifecycle per lot
+   (request → supplier dispatch → lab receipt → testing → report), advanced automatically by inbound lab
+   mail, with a timestamped row per stage.
+3. **Where does every test stand, per lot?** — a live status tracker per MPN × lot × test, updated
    automatically from inbound lab email, with full timestamped history (not just latest state).
-3. **What does the report say?** — a per-lot report repository holding *all* revisions, with the key
+4. **What does the report say?** — a per-lot report repository holding *all* revisions, with the key
    fields and the process-level result matrix parsed on screen so nobody opens the PDF.
-4. **What happens next?** — per-lot and bulk follow-through: notify supplier / buyer / escrow / lab
+5. **What happens next?** — per-lot and bulk follow-through: notify supplier / buyer / escrow / lab
    (report attached), or hand off to logistics with a shipment pre-filled.
+
+Questions 2 and 3 are **separate axes** and the module keeps them separate: the lifecycle answers *where
+the parts are*, the tracker answers *what was tested*. Conflating them is the most tempting wrong turn
+here — see §3 and invariant 18.
 
 Plus the plumbing that makes it trustworthy: a WHL correspondence thread per lot, a manual-match queue
 for unroutable inbound mail, reconciliation alerts, an SLA clock on unanswered chases, an audit trail on
@@ -55,6 +62,8 @@ every change, role-gated actions and an NDA access log on reports.
 | **Conclusion set** | WHL's own overall verdicts: **Acceptable / Not Acceptable / Suspect Counterfeit**. Not a generic pass/fail. |
 | **Escrow release trigger** | Money is released to the supplier on an independent lab PASS. So a lot verdict has financial consequence. |
 | **Three identifiers** | Client PO no., WHL work-order no., WHL report no. (with revision) are *separate* keys and must all be tracked; email routing and reconciliation depend on them. |
+| **Testing lifecycle** | The physical journey of a lot while it's at the lab, distinct from its test results: we raise a work order, the **supplier** ships samples to the lab, the lab confirms receipt, tests, reports progress, finishes testing, compiles the report, and finally shares it. Only the dispatch step originates with us; the rest arrive as lab email. |
+| **Bench-vs-report lag** | Testing finishing and the report arriving are different events, often days apart — the lab is done but the signed report is with its reviewer. Treating them as one event hides where the delay actually is. |
 
 ---
 
@@ -73,6 +82,26 @@ export type AutofillState = "PENDING" | "OK" | "FAILED";
 export type LabEmailDirection = "OUT" | "IN";
 export type LabEmailStatus = "AWAITING_RESPONSE" | "UPDATE_RECEIVED" | "REPORT_DELIVERED" | "ESCALATED" | "SENT";
 export type NotifyParty = "SUPPLIER" | "BUYER" | "ESCROW" | "WHL";
+
+/**
+ * Where a lot sits in the testing LIFECYCLE — "where are the parts and who owes the next
+ * move", as opposed to TestProcessStatus which answers "what was tested". Ordered; a lot
+ * only ever travels forward through it.
+ *
+ * Note the tail order: testing finishing and the report landing are separate events and
+ * the gap between them can be days (bench done, write-up still with the reviewer), so
+ * TESTING_COMPLETED sits BEFORE report preparation and the chain ends on REPORT_SHARED —
+ * the point at which we can actually act.
+ */
+export type TestingStage =
+  | "TEST_REQUESTED"
+  | "SUPPLIER_DISPATCHING"
+  | "COMPONENTS_RECEIVED"
+  | "TESTING_STARTED"
+  | "TESTING_IN_PROGRESS"
+  | "TESTING_COMPLETED"
+  | "REPORT_PREPARATION"
+  | "REPORT_SHARED";
 
 /** One audit row. Every manual test edit and every status change (automated or manual) writes one. */
 export interface TestAuditEntry {
@@ -201,7 +230,38 @@ export interface LotNotification {
   note?: string;             // masking caveat / NDA disclosure / failure reason
 }
 
-/** EXISTING entity — only the last four fields are added by this module. */
+/**
+ * One recorded move along the lifecycle. A list, not a single "current stage", so the UI
+ * can show WHEN each step happened and WHAT moved it — an operator, or an inbound WHL
+ * mail (linked, so the row is auditable back to its evidence).
+ */
+export interface TestingStageEvent {
+  id: string;
+  stage: TestingStage;
+  at: string;                 // "YYYY-MM-DD HH:mm"
+  by: string;                 // operator, "WHL inbox (auto)", or "Supplier (relayed)"
+  note?: string;
+  sourceEmailId?: string;     // the inbound mail that moved the stage
+  manual?: boolean;           // an operator recorded it by hand instead of a mail driving it
+}
+
+/**
+ * The supplier → lab shipment. The lab cannot tell us a shipment exists until it lands, so
+ * this is the one lifecycle input that must come from us. Everything except the fact of
+ * dispatch is optional — chasing a supplier for an AWB must not block the chain from
+ * showing the lot as on its way.
+ */
+export interface LotDispatch {
+  courier?: string;
+  awb?: string;
+  dispatchedOn?: string;
+  expectedArrival?: string;
+  note?: string;
+  recordedBy: string;
+  recordedAt: string;
+}
+
+/** EXISTING entity — only the flagged fields are added by this module. */
 export interface Lot {
   id: string;
   orderLineMpn: string;
@@ -220,6 +280,9 @@ export interface Lot {
   reports?: WhlReport[];      // ← added: all versions; exactly one `current`
   lastUpdateRequestAt?: string; // ← added: SLA clock for an unanswered "Request Update"
   notifications?: LotNotification[]; // ← added
+  stage?: TestingStage;       // ← added: recorded lifecycle position (see lotStage for the displayed one)
+  stageHistory?: TestingStageEvent[]; // ← added: timestamped progression through the chain
+  dispatch?: LotDispatch;     // ← added: supplier → lab leg, recorded when the supplier tells us
 }
 
 /** Order-level containers added by this module. */
@@ -230,6 +293,17 @@ export interface OrderBundle /* extends the host's order aggregate */ {
 ```
 
 **Entity chain:** `PO → MpnTestSpec (per MPN) → Lot → LotTest → TestAuditEntry[] → WhlReport[] (versioned) → LabEmail[] / LotNotification[]`
+
+**Two orthogonal progress axes on a lot — do not conflate them:**
+
+| Axis | Question it answers | Carried by |
+|---|---|---|
+| Lifecycle stage | *Where are the parts, who owes the next move?* | `Lot.stage` + `stageHistory` (`TestingStage`) |
+| Test tracker | *What was tested and with what result?* | `Lot.tests[].status` (`TestProcessStatus`) |
+
+They interact but never substitute: a lot can be `TESTING_COMPLETED` with every test still
+`IN_PROGRESS` on the tracker (the lab has finished the bench but hasn't released results),
+and a report arriving settles the tracker *and* ends the lifecycle.
 
 ### Status → colour tone map
 
@@ -278,6 +352,38 @@ export const TEST_EDIT_ROLES = ["SC", "Mgmt"];
 export const LAB_EMAIL_ROLES = ["SC", "Mgmt"];
 ```
 
+### Testing lifecycle chain (exact copy — this is product text)
+
+Order matters and is the single source of truth; nothing may hardcode which stage is last.
+
+```ts
+export const TESTING_STAGES: readonly TestingStage[] = [
+  "TEST_REQUESTED", "SUPPLIER_DISPATCHING", "COMPONENTS_RECEIVED", "TESTING_STARTED",
+  "TESTING_IN_PROGRESS", "TESTING_COMPLETED", "REPORT_PREPARATION", "REPORT_SHARED",
+] as const;
+
+export const TESTING_TERMINAL_STAGE = TESTING_STAGES[TESTING_STAGES.length - 1]; // REPORT_SHARED
+
+export type StageOwner = "1BUY" | "SUPPLIER" | "WHL";   // labels: "1Buy" | "Supplier" | "WHL"
+
+export const stageIdx   = (s?: TestingStage) => (s ? TESTING_STAGES.indexOf(s) : -1);
+export const stageLabel = (s?: TestingStage) => (s ? TESTING_STAGE_META[s].label : "Not started");
+```
+
+| # | Stage | Label | Description (verbatim) | Owner | Moved by |
+|---|---|---|---|---|---|
+| 1 | `TEST_REQUESTED` | Test Requested | Testing request has been initiated. | 1Buy | Work order raised with WHL for this lot. |
+| 2 | `SUPPLIER_DISPATCHING` | Supplier Dispatching Components | Supplier is preparing and shipping the components to WHL. | Supplier | Supplier confirms dispatch — record it with courier / AWB. |
+| 3 | `COMPONENTS_RECEIVED` | Components Received by WHL | WHL has confirmed receipt of the components. | WHL | Receipt confirmation mail from WHL. |
+| 4 | `TESTING_STARTED` | Testing Started | Laboratory testing has commenced. | WHL | WHL mails to say the lot is on the bench. |
+| 5 | `TESTING_IN_PROGRESS` | Testing In Progress | WHL is actively conducting the required tests and sharing progress updates. | WHL | Interim progress mails from WHL — each one updates the test tracker. |
+| 6 | `TESTING_COMPLETED` | Testing Completed | Testing process has been successfully completed. | WHL | WHL confirms every process in the agreed test plan has been run. |
+| 7 | `REPORT_PREPARATION` | Report Preparation | Testing is complete and the final report is being compiled. | WHL | WHL confirms the report is being written / with its reviewer — this can lag the bench work by days. |
+| 8 | `REPORT_SHARED` | Test Report Shared | WHL has shared the completed test report and results. | WHL | Report received and parsed onto the lot. |
+
+`owner` drives the "waiting on X" pill: the owner of the stage **after** the current one, or
+`null` once the chain is complete.
+
 Test plan by testing mode (used by the PO parser mock):
 
 - `WHL` → first **6** of `WHL_PROCESSES`, standard `AS6081`
@@ -296,6 +402,31 @@ lotTestProgress(lot)               → { total, settled, far, failed, open, notC
 // F.A.R. and NOT_CONDUCTED are NOT settled — they need follow-up.
 
 currentReport(lot)                 → the report with current === true, else highest revision
+
+// ---- lifecycle ----
+lotStage(lot)                      → TestingStage | undefined
+// max(recorded stage, derivedStage(lot)) — the DISPLAYED stage. The derived value is a
+// FLOOR, so a lot that already has a report can never read as "awaiting dispatch", and
+// lots created before the chain existed still render correctly.
+
+derivedStage(lot)                  → TestingStage | undefined   (internal)
+//   reports.length > 0                        → REPORT_SHARED
+//   tests.length > 0 && open === 0            → TESTING_COMPLETED
+//   any test status !== PENDING               → TESTING_IN_PROGRESS
+//   lot.dispatch                              → SUPPLIER_DISPATCHING
+//   lot.workOrderNo                           → TEST_REQUESTED
+//   else                                      → undefined  ("not started")
+// REPORT_PREPARATION is deliberately NOT derivable — it is a state inside the lab that
+// nothing on our side of the wire implies. It only ever arrives by WHL telling us.
+
+lotStageProgress(lot)              → { stage, idx, total, complete, done, pct, next,
+                                       waitingOn, lastEvent, eventFor(stage) }
+// complete  = stage === TESTING_TERMINAL_STAGE
+// done      = idx + 1        pct = round((idx + 1) / total * 100)
+// waitingOn = owner of the NEXT stage, null when complete, "1BUY" when not started
+// eventFor  = the history row that recorded that stage, or undefined if it was skipped
+
+stageWaiting(bundle)               → rows for every lot whose chain is not complete
 
 lotEmails(bundle, lotId)           → emails whose lotId matches
 unmatchedEmails(bundle)            → inbound emails with no lotId  (the manual-match queue)
@@ -346,10 +477,12 @@ where the spec says so. `stamp()` = `"YYYY-MM-DD HH:mm"`, `today()` = `"YYYY-MM-
 | **addMpnTest** | `(orderId, mpn, { name, standard? })` | Manual override. Ignore duplicates (case-insensitive). Push `TestRequirement` with `source: "MANUAL"`, `addedBy`, `addedAt`. Append `ADD` audit row noting "Manual override of the auto-filled list." If spec was `FAILED`, move it to `PENDING` (a human has now reviewed it). Propagate to every lot of that MPN. |
 | **removeMpnTest** | `(orderId, mpn, testId)` | Remove from spec, append `DELETE` audit row (before = "auto-filled test"/"manual test", after = "—"), remove the matching row from every lot of that MPN. |
 | **setLotTestStatus** | `(orderId, lotId, lotTestId, status, note?)` | No-op if unchanged. Set status + `updatedAt`, append `STATUS` history row (before → after, by = operator). |
-| **fetchWhlReport** | `(orderId, lotId)` | Guard: needs `workOrderNo`. `revision = max(existing revisions) + 1` → calling it again fetches the **next revision**. On success: mark all existing reports `current: false`, push the new one as current, set `lot.reportNo`/`testedAt`, set `lot.testStatus = conclusionToLotStatus(...)`, roll the process matrix onto `lot.tests` (create missing rows; append a `REPORT` history row per process citing the report no), append a `REPORT_DELIVERED` inbound email to the thread, add a `WHL_REPORT` document to the order's document vault, clear `lastUpdateRequestAt`, flip any `AWAITING_RESPONSE` outbound mails on that lot to `UPDATE_RECEIVED`. Add reconciliation `parseFlags` when the report MPN ≠ lot MPN, or report client PO ≠ the PO on file. |
+| **recordSupplierDispatch** | `(orderId, lotId, { courier?, awb?, dispatchedOn?, expectedArrival?, note? })` | Store `lot.dispatch` (+ `recordedBy`/`recordedAt`), move the stage to `SUPPLIER_DISPATCHING` with the courier/AWB/date summarised into the history note, and write an order event. The one lifecycle input the lab can't supply. |
+| **setLotStage** | `(orderId, lotId, stage, note?)` | Manual correction — a phone call, or fixing a mis-step. Bypasses the forward-only rule (an operator may go back) and always writes a history row with `manual: true`, noting whether it was a correction backwards. Note the display floor still applies: you cannot make a lot with a report *read* as pre-report. |
+| **fetchWhlReport** | `(orderId, lotId)` | Guard: needs `workOrderNo`. `revision = max(existing revisions) + 1` → calling it again fetches the **next revision**. On success: mark all existing reports `current: false`, push the new one as current, set `lot.reportNo`/`testedAt`, set `lot.testStatus = conclusionToLotStatus(...)`, roll the process matrix onto `lot.tests` (create missing rows; append a `REPORT` history row per process citing the report no), append a `REPORT_DELIVERED` inbound email to the thread, add a `WHL_REPORT` document to the order's document vault, clear `lastUpdateRequestAt`, flip any `AWAITING_RESPONSE` outbound mails on that lot to `UPDATE_RECEIVED`. Add reconciliation `parseFlags` when the report MPN ≠ lot MPN, or report client PO ≠ the PO on file. **Lifecycle: move the stage to `REPORT_SHARED`** (the end of the chain) with the report no + conclusion as the note. |
 | **requestWhlUpdate** | `(orderId, lotId)` | Send the `STATUS_REQUEST` template (same source as the compose modal) and set `lot.lastUpdateRequestAt = today()` (starts the SLA clock). |
 | **sendLabEmail** | `(orderId, { lotId?, subject, body })` | Unshift an OUT email with `status: "AWAITING_RESPONSE"`, `kind = subject.startsWith("Status request") ? "REQUEST_UPDATE" : "CUSTOM"`, then call the mail adapter. On failure mark that email `ESCALATED` with a retry note. |
-| **syncWhlInbox** | `(orderId)` | Poll the lab mailbox for all lots that have a work order. For each message: route by `lotCode` then `workOrderNo`. Matched ⇒ apply its per-test interim statuses (**never downgrade a test already `PASSED`/`FAILED` by a report**), status `UPDATE_RECEIVED`/`REPORT_DELIVERED`, and flip that lot's awaiting outbound mails to `UPDATE_RECEIVED`. Unmatched ⇒ store with `lotId: undefined` + `matchNote` (“Subject line carries no work order, lot or report number — match it manually.”). Toast `"N update(s) applied · M need manual matching"`. |
+| **syncWhlInbox** | `(orderId)` | Poll the lab mailbox for all lots that have a work order. For each message: route by `lotCode` then `workOrderNo`. Matched ⇒ apply its per-test interim statuses (**never downgrade a test already `PASSED`/`FAILED` by a report**), status `UPDATE_RECEIVED`/`REPORT_DELIVERED`, and flip that lot's awaiting outbound mails to `UPDATE_RECEIVED`. Unmatched ⇒ store with `lotId: undefined` + `matchNote` (“Subject line carries no work order, lot or report number — match it manually.”). **Lifecycle: pass each lot's current `lotStage` into the adapter, and when a returned message carries a `stage`, `moveStage` the lot to it citing the mail's subject + id.** Toast the stage advances when any happened (`"LOT-C → Testing Completed"`), else `"N update(s) applied · M need manual matching"`. |
 | **matchLabEmail** | `(orderId, emailId, lotId)` | Attach the email to the lot (copy lotCode/mpn/workOrderNo/poNo), set `matchedBy`, clear `matchNote`, set status by kind, and append an `EMAIL` audit row on that MPN's spec. |
 | **escalateLabEmail** | `(orderId, emailId)` | Set status `ESCALATED`. |
 | **logReportAccess** | `(orderId, lotId, reportId, "VIEW" \| "DOWNLOAD")` | Unshift `{ at, by, action }` onto the report's `accessLog` (NDA requirement). |
@@ -368,6 +501,27 @@ processToTestStatus(result): TestProcessStatus =
   result === "NOT_ACCEPTABLE" ? "FAILED" :
   result === "FAR" ? "FAR" : "NOT_CONDUCTED";
 ```
+
+Lifecycle mutation helper — every automatic stage move goes through it:
+
+```ts
+/** Forward-only. Returns true if the stage actually moved. */
+function moveStage(lot, stage, by, { note?, sourceEmailId?, manual? }) {
+  const from = stageIdx(lot.stage);      // ← the RECORDED stage, not lotStage(lot)
+  const to   = stageIdx(stage);
+  if (to <= from) return false;          // stale mail can't rewind; re-poll is a no-op, not a dupe row
+  lot.stage = stage;
+  (lot.stageHistory ??= []).push({ id: uid(), stage, at: stamp(), by, note, sourceEmailId, manual });
+  return true;
+}
+```
+
+**Compare against `lot.stage`, never `lotStage(lot)`.** The displayed stage is floored by what
+the tests/report imply, and that floor can run *ahead* of what the lab has actually told us —
+applying a mail's per-test updates implies "in progress" before the same mail's "testing has
+started" is recorded. Using the floor here silently swallows those rows, so a stage the lab
+genuinely reported never gets a timestamp. (This was a real bug: `TESTING_STARTED` was
+dropped on 3 of 3 runs.)
 
 ---
 
@@ -407,17 +561,40 @@ Builds a realistic report:
   `riskClass "ERAI Low Risk"`, `msl "MSL 3"`, `packageType "LQFP-100"`, the confidentiality note, and for
   `revision > 1`: `revisionNote = "Revision N — supersedes <wo>.<N-1> (electrical re-test on the flagged units)."`
 
-### 7.3 `whlPollInbox({ workOrders: [{ workOrderNo, lotCode, mpn, testNames }] })`
+### 7.3 `whlPollInbox({ workOrders: [{ workOrderNo, lotCode, mpn, testNames, stage? }] })`
 Latency 500–1500 ms · no injected failure beyond chaos.
 
-One message per work order, kind weighted **STATUS_UPDATE 45 / REPORT 25 / DELAY 15 / AMBIGUOUS 15**:
-- `AMBIGUOUS`: subject `"RE: Testing update"`, **no** work order / lot / report keys → must land in the
-  manual-match queue. Body: *"Hi, quick update on the parts you sent through — one of the lots needs another
-  day on the electrical bench. Will revert with the report. Regards, WHL"*
-- `REPORT`: subject `"WHL Report <wo>.1 — <mpn> (Lot <lot>)"`, attachment `"WHL-<wo>.1.pdf"`.
-- `STATUS_UPDATE`: subject `"Interim status — WO <wo> / Lot <lot>"`, `testUpdates` = first 2 test names → `IN_PROGRESS`.
-- `DELAY`: subject `"Delay notice — WO <wo> / Lot <lot>"`, `testUpdates` → `PENDING`, note
-  `"Delayed — bench backlog at WHL"`.
+Message kinds: `STATUS_UPDATE | REPORT | DELAY | AMBIGUOUS | RECEIPT`. Each message may carry
+`stage?: TestingStage` — the lifecycle position it moves the lot to (absent ⇒ no stage change).
+
+**The adapter is stage-aware**: it answers with the mail that plausibly comes *next* for that lot,
+given the `stage` passed in. This is what makes the lifecycle demoable — polling repeatedly walks a
+lot along the chain one step at a time instead of firing a random status mail at a lot that already
+has its report. Independently of stage, **~15% of polls return an `AMBIGUOUS` mail** (subject
+`"RE: Testing update"`, no routing keys) so the manual-match queue keeps getting exercised.
+
+| Lot is at | Reply | Kind | → stage |
+|---|---|---|---|
+| before `SUPPLIER_DISPATCHING` | `"Awaiting samples — WO x / Lot y"` — *we have your work order but the samples have not reached us; please share dispatch details* | `STATUS_UPDATE` | — (the lab **cannot** confirm a receipt that hasn't happened) |
+| before `COMPONENTS_RECEIVED` | `"Receipt confirmation — …"` — quantity and packaging match, lot booked in and queued | `RECEIPT` | `COMPONENTS_RECEIVED` |
+| before `TESTING_STARTED` | `"Testing commenced — …"` | `STATUS_UPDATE` | `TESTING_STARTED` |
+| before `TESTING_IN_PROGRESS` | first interim update (20% a delay notice instead) | `STATUS_UPDATE` / `DELAY` | `TESTING_IN_PROGRESS` |
+| before `TESTING_COMPLETED` | weighted **interim 30 / delay 10 / done 60**; "done" = `"Testing complete — all processes conducted, results with our reviewer"` | `STATUS_UPDATE` / `DELAY` | `TESTING_IN_PROGRESS` (no-op) or `TESTING_COMPLETED` |
+| before `REPORT_PREPARATION` | `"Report in preparation — with our laboratory manager for sign-off"` | `STATUS_UPDATE` | `REPORT_PREPARATION` |
+| before `REPORT_SHARED` | `"WHL Report <wo> — <mpn> (Lot <lot>)"`, attachment `"WHL-<wo>.1.pdf"` | `REPORT` | `REPORT_SHARED` |
+| at `REPORT_SHARED` | `null` — nothing further unless we ask (re-test, F.A.R. follow-up) | — | — |
+
+Two ordering rules that must not be dropped, both found by testing:
+
+1. **The "testing commenced" mail carries NO `testUpdates`.** Marking a test `IN_PROGRESS` there
+   implies `TESTING_IN_PROGRESS` via the derived floor and collapses the distinct "Testing Started"
+   step the lab actually reports. Per-test progress arrives with the interim mails that follow.
+2. **The first interim update always lands before report preparation** (its own branch, not part of
+   the weighted pick), otherwise a lot can jump from "started" straight to "report prep" and
+   `TESTING_IN_PROGRESS` is never visited.
+
+Interim mails set the first 2 test names to `IN_PROGRESS`; delay notices set them to `PENDING` with
+note `"Delayed — bench backlog at WHL"`.
 
 ### 7.4 `whlSendMail({ to, subject, body, workOrderNo?, lotCode?, mpn?, poNo? })`
 Latency 300–900 ms · failure `MAIL_RELAY_DOWN / "Mail relay unavailable — retry" / 503`. Returns `{ messageId, to, queuedAt }`.
@@ -530,9 +707,13 @@ Result still pending: {codes}.
 │ lot-wise results table (always visible)                                            │
 │   ☑ | Lot (+lab/WO) | MPN | Verdict | Tests n/m + bar | F.A.R. | Not acc. |        │
 │     Current report (no + conclusion pill + "k rev.") | Outstanding (blocker,       │
-│     "chase Nd overdue", "awaiting reply")                                          │
+│     "chase Nd overdue", "awaiting reply") | Progress                               │
 │   → clicking a row scopes to that lot (click again clears); the checkbox cell      │
 │     stops propagation so ticking never changes scope                               │
+│   → Progress cell = [▸ <current stage>  n/8] "track progress". Clicking expands    │
+│     the lifecycle stepper as a full-width row directly beneath (§9.3a), so the     │
+│     stages are reachable without leaving the roll-up. One lot open at a time;      │
+│     the cell stops propagation so tracking never changes scope.                    │
 │                                                                                    │
 │ escrow strip (unchanged behaviour) — green "A lot PASSED — release the escrow      │
 │   tranche" + [Extend window] [Release escrow]; footnote about PASS/FAIL + refund   │
@@ -548,10 +729,12 @@ Default sub-tab: **Lots · status · reports**. Badges are small warn-coloured c
 Intro line: *"Test requirements are **parsed off the PO**, never typed — the PO already carries the test
 table. Manual edits are allowed as an override and every one is logged (who · when · before → after)."*
 
-One panel per order line (filtered to the scoped lot's MPN when a lot is selected):
-- title: `MPN` (mono) · testing-mode pill · `make · qty N · k lot(s)`
-- actions: state pill (`auto-filled` / `auto-fill failed` / `not parsed`) · `[🕘 auditCount]` toggle ·
-  `[✎ Edit tests | Done]` (role-gated)
+One **collapsed-by-default** card per order line (filtered to the scoped lot's MPN when a lot is
+selected) — see §9.7 for the collapse rules:
+- title (always visible): `MPN` (mono) · testing-mode pill · `make · qty N · k lot(s)`
+- summary (always visible): state pill (`auto-filled` / `auto-fill failed` / `not parsed`) ·
+  `k tests` · `m manual` when a human overrode anything
+- actions (only when expanded): `[🕘 auditCount]` toggle · `[✎ Edit tests | Done]` (role-gated)
 - `auto-fill failed` ⇒ red notice with the reason + `[Retry parse]`
 - no spec at all (and mode ≠ NONE) ⇒ amber notice + `[Auto-fill now]`
 - meta row: `source: <PO>` · `parsed: <ts>` · `confidence: n%` · `k auto · m manual`
@@ -566,11 +749,18 @@ One panel per order line (filtered to the scoped lot's MPN when a lot is selecte
 
 ### 9.3 Sub-tab — Lots · status · reports
 
-One card per lot (only the scoped lot when filtered, with a note explaining the filter):
+One **collapsed-by-default** card per lot (only the scoped lot when filtered, with a note explaining
+the filter) — see §9.7 for the collapse rules:
 
-- **title**: flask icon · lot code · MPN (mono) · `lab · WO n · qty N / sample M · DC x`
-- **actions**: verdict pill · `[⚡ Next actions ▾]` (disabled until a report exists) ·
+- **title** (always visible): flask icon · lot code · MPN (mono) · `lab · WO n · qty N / sample M · DC x`
+- **summary** (always visible — enough to spot the lot that needs attention among a hundred):
+  verdict pill · `n/m tests` · current lifecycle stage + `n/8` (green when complete) · report no
+  (or amber `no report`) · blocker pill (`not acceptable` / `F.A.R.` / `not conducted`) · clock icon
+  when a WHL reply is outstanding
+- **actions** (only when expanded): `[⚡ Next actions ▾]` (disabled until a report exists) ·
   `[Fetch report | Fetch revision]` · `[Email WHL]`
+- **lifecycle stepper** (§9.3a) — first thing in the body, above the test tracker: where the parts
+  physically are comes before what was tested
 - **status tracker** header: `Test status tracker  n/m passed · k F.A.R. · k not acceptable · k not conducted · k open`
 - **tracker table**: `Test | Std | Source | Status | Accept / Reject | Updated | Set`
   - the test name is a disclosure toggle; expanded row shows **Status history** newest-first:
@@ -579,13 +769,61 @@ One card per lot (only the scoped lot when filtered, with a note explaining the 
   - empty: *"No tests on this lot — the MPN's test list is empty or failed to auto-fill (see MPNs & tests)."*
 - **report repository** (§9.4)
 - **result circulated** block (only when a report exists): party pills
-  `Supplier ✓ <ts> · report attached` / `Buyer · not notified` (ok / bad / neutral tones), then a
-  line-per-notification log `at · party → to · subject · attachments`, failures in red with the reason.
-  Caption: *"use **Next actions** above to send"*.
+  `Supplier ✓ <ts> · report attached` / `Buyer · not notified` (ok / bad / neutral tones) stay visible —
+  they are the summary. The line-per-notification log (`at · party → to · subject · attachments`,
+  failures in red with the reason) sits behind a **`▸ Show history (n)` / `▾ Hide history (n)`**
+  disclosure, **collapsed by default**. Caption: *"use **Next actions** above to send"*.
 - **footer**: `Lot verdict [PASS][MAYBE][FAIL]` (unchanged lot logic) + *"drives the escrow release /
   refund path"*; right side: `awaiting WHL reply` chip, `n message(s)`, and context buttons —
   `[Request update]` when no report, `[F.A.R. follow-up]` when `anyFar`, `[Re-test request]` when FAIL,
   `[Escalate TAT]` when awaiting.
+
+### 9.3a Testing lifecycle stepper (per lot)
+
+Deliberately the **same visual shape as the order's Journey stepper**, so the two read as one idea at
+different scales: reuse the host's stepper markup rather than inventing a second treatment.
+
+```
+┌ Testing lifecycle · 6/8 stages                          [◉ At: Testing Completed ·  ┐
+│                                                             waiting on WHL]         │
+│   ✓────✓────✓────✓────✓────◉────⑦────⑧                                              │
+│  Test  Supp  Comp  Test  Test  Test  Rep   Test                                     │
+│  Req   Disp  Recd  Strt  InPr  Cmpl  Prep  RepShared                                │
+│  07-19 07-19 07-21 07-21 07-23 07-24                                                │
+│ ─────────────────────────────────────────────────────────────────────────────────── │
+│  Testing Completed — Testing process has been successfully completed.               │
+│    · 2026-07-24 09:05 · WHL inbox (auto)                                            │
+│  Testing complete — all six processes conducted; results with the reviewer.         │
+│  Next: Report Preparation — WHL confirms the report is being written / with its      │
+│        reviewer — this can lag the bench work by days.                              │
+│  [🚚 Record supplier dispatch]  [↻ Check WHL for updates]  mark report preparation… │
+│  ┌ 🚚 Supplier → WHL Shenzhen · recorded by A. Sharma · 2026-07-19 15:10 ─────────┐  │
+│  │ DHL Express · AWB 4471-9920-11 · dispatched 2026-07-19 · ETA 2026-07-21        │  │
+│  └───────────────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+- **Nodes**: done = filled primary with ✓ · current = primary ring + the stage's icon · future =
+  muted outline with its index number. Half-rails either side, coloured primary up to the current node.
+- **Labels** under each node, current one emphasised, with the recorded date (`MM-DD`) beneath when a
+  history row exists. Non-1Buy owners carry a tiny icon (truck for Supplier, flask for WHL).
+- **Tooltip per node**: the stage description, plus either `at · by — note` when recorded, or
+  `↳ <trigger>` when not yet reached. This is where the per-stage detail lives — the stepper itself
+  stays one line tall.
+- **Header pill**: `✓ Report received` when complete, else `◉ At: <stage> · waiting on <owner>`, or
+  `⏳ Not requested yet` before a work order exists.
+- **Below the rail**: the current stage in words + its recorded `at · by` (`(recorded manually)` when
+  applicable) + note, then `Next: <stage> — <trigger>`.
+- **Actions**: `[Record supplier dispatch]` only while the chain is short of `SUPPLIER_DISPATCHING`;
+  `[Check WHL for updates]` (= `syncWhlInbox`) until complete; a `mark <next stage> done` text link
+  (role-gated) for the phone-call case.
+- **Dispatch block** rendered whenever `lot.dispatch` exists.
+- Stages before the current one read as **done even without a history row** — a lot can arrive
+  mid-chain (report fetched before anyone recorded the dispatch), and pretending those steps never
+  happened misleads more than showing them done without a timestamp.
+
+**Compact variant** (`TestingStageBar`) — 8 thin segments + `<stage label> n/8 · waiting on <owner>`.
+Used in the scope banner and on the cross-order testing board, one row per lot.
 
 ### 9.4 Report repository + parsed summary (per lot)
 
@@ -619,9 +857,18 @@ With reports ⇒ bordered block:
    waiting — every inbound WHL email is matched to a lot."* Caption: *"Unroutable mail is held here rather
    than dropped or applied to the wrong lot. Matching it applies its updates to that lot's tracker."*
 3. **Panel "Correspondence & tracking history"** — lot filter `<select>` (defaults to the header's scope,
-   still overridable); chronological thread with a dot (primary = sent, ok = received), `sent`/`received`
+   still overridable); newest-first thread with a dot (primary = sent, ok = received), `sent`/`received`
    pill, status pill, timestamp, `lotCode · mpn · WO`, subject, body (pre-wrapped), then
    `by · attachments · matched by · [Mark escalated]` for awaiting outbound mail.
+
+   **Only the 2 most recent messages render.** The rest sit behind
+   `▸ Show N earlier message(s)` / `▾ Hide the earlier N message(s)`, and the panel footer states the
+   truncation plainly: *"Showing the 2 most recent of N."* A long-running lot accumulates dozens of
+   mails; silently rendering all of them buries the thread that matters.
+
+   Each body is **clamped to 2 lines** with a `▸ view full email` / `▾ collapse` toggle (the subject is
+   also clickable). Short mails — under ~160 characters and single-line — render whole and get **no**
+   toggle, so the control only appears where it does something.
 
 ### 9.6 Menus and modals
 
@@ -663,7 +910,38 @@ disclosure is logged on every lot the digest covered."*; footer `[Send k mails]`
 **Match-email modal** — the mail in a bordered preview, the match note, a lot `<select>` with hint *"the
 mail's updates get applied to this lot's tracker"*, `[Match]`.
 
-### 9.7 Logistics hand-off (separate screen)
+**Record-dispatch modal** — context strip (`lot · MPN · sample of qty · WO → lab`) plus the consequence
+spelled out: *"Moves the lot to **Supplier Dispatching Components**. WHL's receipt confirmation then
+advances it again on the next inbox sync."* Fields: `Courier` · `AWB / tracking no` (hint *"optional —
+leave blank if the supplier hasn't shared it"*) · `Dispatched on` (defaults to today) · `Expected at lab`
+(optional) · `Note` (hint *"how the supplier told us — mail, call, portal"*). Footer `[Record dispatch]`.
+Only the fact of dispatch is required — see `LotDispatch`.
+
+### 9.7 Collapse / density rules (all three sub-tabs)
+
+An order can carry 100 lots. Rendering every card open makes the tab unscrollable and the 100th lot
+unreachable, so **every repeated card starts collapsed** and the operator opens what they need.
+
+| Surface | Collapsed by default | Always-visible summary |
+|---|---|---|
+| MPN card (§9.2) | test list, meta row, edit controls, audit trail | MPN · mode · make/qty/lots · state pill · `k tests` · `m manual` |
+| Lot card (§9.3) | stepper, test tracker, report repository, notifications, verdict footer | lot · MPN · lab/WO/qty/DC · verdict · `n/m tests` · stage + `n/8` · report no · blocker · awaiting-reply clock |
+| Result circulated (§9.3) | the per-notification log | the party pills |
+| Correspondence (§9.5) | everything older than the 2 most recent; each body clamped to 2 lines | the 2 most recent messages |
+
+Rules that apply to the card lists:
+
+- **`ExpandBar` above the list**: `N lot(s) · M expanded · collapse all · expand all · click a row to
+  open it`. `collapse all` shows only when something is open; **`expand all` only when the list has ≤ 12
+  items** — with 100 lots it would recreate the exact problem the collapse solves.
+- **Filtering auto-expands.** When the list is filtered to a single item (lot scope selector, or the MPN
+  of a scoped lot), that card renders open — the filter is already the request to see it, so don't make
+  them click twice.
+- **Multiple cards may be open at once** (so two lots can be compared); `collapse all` resets.
+- Chevron ▸/▾ on the card title, `aria-expanded` set, whole title row is the hit target, tooltip
+  `Minimize` / `Expand`.
+
+### 9.8 Logistics hand-off (separate screen)
 
 Deep link: `/<logistics-route>?order=<orderId>&lot=<lotId>` (single) or `&lots=a,b,c` (bulk).
 
@@ -712,7 +990,23 @@ If the host route is statically pre-rendered, wrap the search-param reader in a 
 13. **Logistics quantities are capped by reality.** Never offer to ship more than is unshipped; say when a
     quantity was capped rather than silently reducing it.
 14. **Role gating lives in one place** (a `useRole()`-style hook), not sprinkled through components.
-15. **Nothing silently truncates.** Counts, caps, exclusions and pending lots are always stated on screen.
+15. **Nothing silently truncates.** Counts, caps, exclusions and pending lots are always stated on screen —
+    including the collapsed surfaces: *"Showing the 2 most recent of 6"*, `N lots · M expanded`, `Show N
+    earlier message(s)`. Collapsed is never the same as absent.
+16. **The lifecycle only moves forward.** A stale interim mail arriving after the report cannot rewind a
+    lot, and re-polling the same stage is a no-op, not a duplicate history row. Only an explicit operator
+    correction (`setLotStage`) may go backwards, and it is logged as `manual`.
+17. **The displayed stage is floored by evidence.** A lot holding a report can never *read* as
+    pre-report, whatever is recorded — so imported or legacy lots can't display a lie. But the floor is
+    display-only: stage *writes* compare against the recorded stage (see `moveStage`).
+18. **Stage and test status are separate axes.** Neither is derived from the other's vocabulary; a lot can
+    be `TESTING_COMPLETED` with tests still `IN_PROGRESS`. Don't collapse them into one field.
+19. **The lab can't report what hasn't happened.** No inbound mail may establish `SUPPLIER_DISPATCHING` —
+    the lab learns of a shipment only when it lands, so that stage is an operator input. Before it,
+    the lab chases *us* for the samples.
+20. **Reaching the last stage ≠ a good result.** `REPORT_SHARED` means the report is in hand; whether the
+    lot is acceptable is `testStatus` + the blocker, and an F.A.R. still needs follow-up on a chain that
+    reads complete.
 
 ---
 
@@ -742,11 +1036,13 @@ If the host route is statically pre-rendered, wrap the search-param reader in a 
 | `src/integrations/lab-whl.ts` | §7.2–7.4 + `conclusionToLotStatus` / `processToTestStatus` | 200 |
 | `src/integrations/doc-extract.ts` | §7.1 | +55 |
 | `src/integrations/notify.ts` | §7.5 | 35 |
-| `src/store/store.ts` | actions §6 | +420 |
-| `src/store/selectors.ts` | derived state §5 | +120 |
-| `src/components/order/testing-tab.tsx` | the whole screen §9.1–9.5 + both menus | 780 |
-| `src/components/order/modals.tsx` | compose / notify / bulk-notify / match / shipment-prefill | +340 |
-| `src/app/fulfilment/logistics/page.tsx` | §9.7 hand-off | +90 |
+| `src/store/store.ts` | actions §6 + the `moveStage` helper | +480 |
+| `src/store/selectors.ts` | derived state §5 incl. the lifecycle selectors | +180 |
+| `src/components/order/testing-tab.tsx` | the whole screen §9.1–9.7 + both menus + `CollapsibleCard` / `ExpandBar` / `MailRow` / `LotProgressToggle` | 1100 |
+| `src/components/order/testing-stages.tsx` | §9.3a — `TestingStageChain` (stepper) + `TestingStageBar` (compact) | 210 |
+| `src/components/order/modals.tsx` | compose / notify / bulk-notify / match / record-dispatch / shipment-prefill | +400 |
+| `src/app/fulfilment/logistics/page.tsx` | §9.8 hand-off | +90 |
+| `src/app/fulfilment/testing/page.tsx` | cross-order board — one `TestingStageBar` per lot | +10 |
 | `src/data/fixtures.ts`, `src/data/order-details.ts` | demo seed §13 | +700 |
 
 ---
@@ -757,9 +1053,20 @@ Seed **one order** with three lots that between them exercise everything:
 
 | Lot | MPN | State | Demonstrates |
 |---|---|---|---|
-| **LOT-A** | MCU, qty 300, sample 20, WO `352146` | `PASS`, two reports: `352146.1` Not Acceptable (electrical 18/2, die analysis Not Conducted) superseded by **`352146.2` Acceptable** (all six processes acceptable, revision note) | revision history · superseded vs current · a settled lot · full test history including a FAILED → IN_PROGRESS → PASSED progression |
-| **LOT-B** | power IC, qty 150, sample 20, WO `352147` | `MAYBE`, report `352147.1` **Acceptable with X-Ray F.A.R.** (19/1) and `clientPo: "PO Unknown"` | the Acceptable-but-F.A.R. nuance · reconciliation alert + one-click fix · blocker text "F.A.R. — needs follow-up" |
-| **LOT-C** | same MPN as B, qty 100, sample 15, WO `352151` | `PENDING`, **no report**, `lastUpdateRequestAt` ≈ 4 business days ago, tests `IN_PROGRESS`/`PENDING` | "Not Available" + Request Update · SLA-overdue banner with Chase/Escalate · an open lot in the roll-up |
+| **LOT-A** | MCU, qty 300, sample 20, WO `352146` | `PASS`, two reports: `352146.1` Not Acceptable (electrical 18/2, die analysis Not Conducted) superseded by **`352146.2` Acceptable** (all six processes acceptable, revision note). Lifecycle **`REPORT_SHARED`** — full 8-row history | revision history · superseded vs current · a settled lot · full test history including a FAILED → IN_PROGRESS → PASSED progression · a **completed** lifecycle |
+| **LOT-B** | power IC, qty 150, sample 20, WO `352147` | `MAYBE`, report `352147.1` **Acceptable with X-Ray F.A.R.** (19/1) and `clientPo: "PO Unknown"`. Lifecycle **`REPORT_SHARED`** | the Acceptable-but-F.A.R. nuance · reconciliation alert + one-click fix · blocker text "F.A.R. — needs follow-up" · a chain that is complete while the *result* still needs follow-up |
+| **LOT-C** | same MPN as B, qty 100, sample 15, WO `352151` | `PENDING`, **no report**, `lastUpdateRequestAt` ≈ 4 business days ago, tests `IN_PROGRESS`/`PENDING`. Lifecycle **`TESTING_IN_PROGRESS`** (5 rows) | "Not Available" + Request Update · SLA-overdue banner with Chase/Escalate · an open lot in the roll-up · a chain **mid-flight**, so "Check WHL for updates" visibly advances it |
+
+**Lifecycle seed rules** (get these wrong and the tab contradicts itself):
+
+- Every lot gets a `stageHistory` **consistent with its own test tracker**. LOT-C's tracker already has a
+  test `IN_PROGRESS`, so its history must reach `TESTING_IN_PROGRESS` — stopping at `TESTING_STARTED`
+  makes the derived floor override the seed and the two disagree.
+- Give LOT-A a **visible gap between `TESTING_COMPLETED` (24th 09:05) and `REPORT_SHARED` (25th 16:05)**.
+  That gap is the reason the two are separate stages; a seed where they share a timestamp hides the point.
+- Seed `lot.dispatch` (courier · AWB · dates) on all three, and point the `REPORT_SHARED` /
+  `TESTING_IN_PROGRESS` rows at the matching seeded `LabEmail` via `sourceEmailId` so "which mail moved
+  this?" resolves in the demo.
 
 Also seed:
 - **MPN specs**: MCU = auto-filled OK (5 from the PO + 1 manual `Decapsulation & Die Analysis` with a real
@@ -801,10 +1108,32 @@ Reports
 - [ ] `PO Unknown` / MPN mismatch raise reconciliation alerts; the fix is one click and audited.
 - [ ] Views and downloads are access-logged; the NDA note is visible.
 
+Lifecycle
+- [ ] Every lot shows the 8-stage chain with the current stage, `n/8`, and who the next step is waiting on.
+- [ ] A fresh lot walks the whole chain in order: work order → dispatch recorded → receipt → started →
+      in progress → testing completed → report preparation → report shared. No stage is skipped.
+- [ ] `Testing Completed` and `Test Report Shared` are separate rows with separate timestamps — the bench
+      can finish days before the report lands.
+- [ ] Polling the inbox repeatedly advances one step at a time; a completed lot is left untouched.
+- [ ] Before dispatch is recorded, the lab chases us for the samples instead of confirming a receipt.
+- [ ] A stale interim mail can't rewind a lot; re-polling the same stage adds no duplicate row.
+- [ ] Mail-driven history rows cite a `sourceEmailId` that exists on the lot's thread.
+- [ ] Manual `mark … done` and the dispatch modal both write rows attributed to the operator.
+
 Roll-up & filter
 - [ ] The lot selector scopes tiles, progress, alerts and all three sub-tabs; "All lots" restores the total.
-- [ ] The lot-wise table shows verdict, tests n/m, F.A.R., not-acceptable, current report and the blocker.
+- [ ] The lot-wise table shows verdict, tests n/m, F.A.R., not-acceptable, current report, the blocker and
+      the lifecycle stage.
 - [ ] Clicking a row scopes; clicking again clears; ticking a checkbox never changes scope.
+- [ ] The Progress cell expands the stepper in place without changing the scope.
+
+Density (works at 100 lots, not just 3)
+- [ ] MPN and lot cards start collapsed, with enough summary to pick the right one without opening it.
+- [ ] `collapse all` appears once something is open; `expand all` only for ≤ 12 items.
+- [ ] Filtering to one lot / MPN auto-expands that card.
+- [ ] Correspondence shows only the 2 most recent mails, states the total, and expands on demand.
+- [ ] Long mail bodies are clamped with `view full email`; short ones get no toggle.
+- [ ] The "Result circulated" notification log is collapsed behind `Show history (n)`.
 
 Actions
 - [ ] "Next actions" is disabled until a report exists, and shows ✓ + timestamp for parties already told.

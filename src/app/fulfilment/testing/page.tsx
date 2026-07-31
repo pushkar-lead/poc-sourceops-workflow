@@ -5,6 +5,7 @@ import { FileText, MailQuestion, AlertTriangle } from "lucide-react";
 import { useStore } from "@/store/store";
 import { allLots, lotTestProgress, currentReport, unmatchedEmails } from "@/store/selectors";
 import { Panel, Pill, StatusPill, PageHeader, Progress } from "@/components/ui/primitives";
+import { TestingStageBar } from "@/components/order/testing-stages";
 import { cn } from "@/lib/utils";
 
 export default function TestingPage() {
@@ -55,6 +56,8 @@ export default function TestingPage() {
                     </div>
                     {p.total > 0 && <div className="mt-1.5 max-w-xs"><Progress value={pct} /></div>}
                   </div>
+                  {/* where the lot sits at the lab — the question the board is usually opened for */}
+                  <TestingStageBar lot={r} className="w-52" />
                   <StatusPill status={r.testStatus} />
                   <div className="flex gap-1">
                     {(["PASS", "MAYBE", "FAIL"] as const).map((st) => (

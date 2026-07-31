@@ -6,9 +6,10 @@ import type {
   Order, OrderBundle, OrderLine, ClientPO, SupplierPO, SupplierPoLine, PoTerms, Address, JourneyPhase, TestStatus, TestingMode, PaymentMode, PaymentDirection,
   PaymentStatus, ShipmentLeg, ShipmentStatus, TradeType, ApprovalState,
   LotTest, MpnTestSpec, TestAuditEntry, TestProcessStatus, WhlReport, LabEmail, NotifyParty,
+  Lot, TestingStage, LotDispatch,
 } from "@/types";
 import { ORDERS, CLIENT_POS, SUPPLIER_POS, ONEBUY_HUB, getOrderBundle, buildJourney } from "@/data/fixtures";
-import { remainingToShipLeg, remainingToAllocate, escrowRemaining, gateReason, sourcedForClientLine, mappedForOrderLine, orderSourcedForClient, deliveredForClientLine } from "@/store/selectors";
+import { remainingToShipLeg, remainingToAllocate, escrowRemaining, gateReason, sourcedForClientLine, mappedForOrderLine, orderSourcedForClient, deliveredForClientLine, lotStage } from "@/store/selectors";
 import type { OrdersMap } from "@/store/selectors";
 // ---- mock external-API adapters (swap for real fetch() in production) ----
 import { fileBillOfEntry, getAssessment, getClearanceStatus } from "@/integrations/customs-icegate";
@@ -18,7 +19,7 @@ import {
   conclusionToLotStatus, processToTestStatus,
 } from "@/integrations/lab-whl";
 import { extractPoTestRequirements } from "@/integrations/doc-extract";
-import { WHL_CONTACT, whlTemplate } from "@/data/enums";
+import { WHL_CONTACT, whlTemplate, TESTING_STAGE_META, stageIdx } from "@/data/enums";
 import { hkinOpenAccount, hkinFundSuperInvoice, hkinReleaseTranche, hkinRefund, hkinRequestExtension, buyerToken, sellerToken } from "@/integrations/escrow-hkin";
 import { bankInitiateTransfer, bankGetTransferStatus } from "@/integrations/banking";
 import { generateIrn } from "@/integrations/einvoice-irp";
@@ -39,6 +40,37 @@ const auditRow = (a: Omit<TestAuditEntry, "id" | "at">): TestAuditEntry => ({ id
 
 const ME = "You (demo)";
 const WHL_BOT = "WHL inbox (auto)";
+const SUPPLIER_RELAY = "Supplier (relayed)";
+
+/**
+ * Move a lot forward along the testing lifecycle. Forward-only: a stale interim mail
+ * arriving after the report can't rewind a lot, and re-polling the same stage is a
+ * no-op rather than a duplicate history row. Returns true if the stage actually moved.
+ *
+ * Compares against the *recorded* stage, not the displayed one. The displayed stage
+ * (`lotStage`) is floored by what the lot's tests/report imply, and that floor can run
+ * ahead of what the lab has actually told us — e.g. applying a mail's per-test updates
+ * implies "in progress" before the same mail's "testing has started" is recorded. Using
+ * the floor here silently swallowed those rows, so a stage the lab genuinely reported
+ * never got a timestamp.
+ */
+function moveStage(
+  lot: Lot,
+  stage: TestingStage,
+  by: string,
+  o: { note?: string; sourceEmailId?: string; manual?: boolean } = {},
+): boolean {
+  const from = stageIdx(lot.stage);
+  const to = stageIdx(stage);
+  if (to <= from) return false;
+  lot.stage = stage;
+  (lot.stageHistory ??= []).push({
+    id: uid("stg"), stage, at: stamp(), by,
+    note: o.note, sourceEmailId: o.sourceEmailId, manual: o.manual,
+  });
+  return true;
+}
+
 
 function freshSeed(): { orders: OrdersMap; clientPos: typeof CLIENT_POS; supplierPos: SupplierPO[] } {
   const orders: OrdersMap = {};
@@ -99,6 +131,9 @@ interface Store {
   addMpnTest: (orderId: string, mpn: string, t: { name: string; standard?: string }) => void;  // audited manual override
   removeMpnTest: (orderId: string, mpn: string, testId: string) => void;                        // audited manual override
   setLotTestStatus: (orderId: string, lotId: string, lotTestId: string, status: TestProcessStatus, note?: string) => void;
+  // ---- testing lifecycle (the stage chain a lot walks while it's at the lab) ----
+  recordSupplierDispatch: (orderId: string, lotId: string, d: Omit<LotDispatch, "recordedBy" | "recordedAt">) => void;
+  setLotStage: (orderId: string, lotId: string, stage: TestingStage, note?: string) => void;
   fetchWhlReport: (orderId: string, lotId: string) => void;           // pull (or revise) the report + parse it on screen
   requestWhlUpdate: (orderId: string, lotId: string) => void;         // pre-mapped outbound chase
   sendLabEmail: (orderId: string, m: { lotId?: string; subject: string; body: string }) => void;
@@ -356,13 +391,22 @@ export const useStore = create<Store>()(
         void (async () => {
           try {
             const wo = await whlSubmitTestJob({ clientRef: `${orderId}:${lot.lotCode}`, mpn: lot.orderLineMpn, dateCode: lot.dateCode, lotCode: lot.lotCode, lotQty: lot.qty, sampleQty: lot.sampleQty, testPlan: "AS6081", labSite: lot.lab?.includes("Hong") ? "HONGKONG" : "SHENZHEN" });
-            set((s) => { const l = s.orders[orderId]?.lots.find((x) => x.id === lotId); if (l) { l.workOrderNo = wo.workOrderNo; l.tatDays = wo.estimatedTatDays; l.lab = lot.lab ?? "WHL Shenzhen"; } });
+            set((s) => {
+              const l = s.orders[orderId]?.lots.find((x) => x.id === lotId); if (!l) return;
+              l.workOrderNo = wo.workOrderNo; l.tatDays = wo.estimatedTatDays; l.lab = lot.lab ?? "WHL Shenzhen";
+              moveStage(l, "TEST_REQUESTED", ME, { note: `Work order ${wo.workOrderNo} raised with ${l.lab} — quoted TAT ${wo.estimatedTatDays} days.` });
+            });
             toast.success(`WHL work order ${wo.workOrderNo}`);
           } catch (e) { toast.error(`WHL: ${errMsg(e)}`); }
         })();
       },
       setLotStatus: (orderId, lotId, status) => {
-        set((s) => { const l = s.orders[orderId]?.lots.find((x) => x.id === lotId); if (l) { l.testStatus = status; l.testedAt = today(); } });
+        // The verdict is a call on the *result*, not a lifecycle move — the chain ends when
+        // the report arrives, which any lot with a verdict has already passed.
+        set((s) => {
+          const l = s.orders[orderId]?.lots.find((x) => x.id === lotId); if (!l) return;
+          l.testStatus = status; l.testedAt = today();
+        });
         if (status === "PASS") toast.success("Lot PASSED — you can release the escrow tranche");
         else if (status === "FAIL") toast.error("Lot FAILED — start the return / refund path");
         else toast(`Lot set ${status}`);
@@ -504,6 +548,49 @@ export const useStore = create<Store>()(
         });
       },
 
+      /**
+       * The supplier tells us the parts are on their way to WHL. This is the one stage
+       * no mail from the lab can establish — WHL only learns of the shipment when it
+       * lands — so it's an explicit operator input, and it starts the lab-side clock.
+       */
+      recordSupplierDispatch: (orderId, lotId, d) => {
+        let moved = false;
+        set((s) => {
+          const b = s.orders[orderId]; if (!b) return;
+          const lot = b.lots.find((x) => x.id === lotId); if (!lot) return;
+          lot.dispatch = { ...d, recordedBy: ME, recordedAt: stamp() };
+          const detail = [d.courier, d.awb && `AWB ${d.awb}`, d.dispatchedOn && `dispatched ${d.dispatchedOn}`, d.expectedArrival && `ETA ${d.expectedArrival}`]
+            .filter(Boolean).join(" · ");
+          moved = moveStage(lot, "SUPPLIER_DISPATCHING", SUPPLIER_RELAY, {
+            note: [detail || "Supplier confirmed dispatch to WHL.", d.note].filter(Boolean).join(" — "),
+          });
+          b.events.unshift({
+            id: uid("ev"), eventType: "GENERAL",
+            message: `${lot.lotCode} (${lot.orderLineMpn}) dispatched by the supplier to ${lot.lab ?? "WHL"}${detail ? ` — ${detail}` : ""}.`,
+            source: "WHL", occurredAt: today(), recordedBy: ME,
+          });
+        });
+        toast.success(moved ? "Dispatch recorded — waiting on WHL to confirm receipt" : "Dispatch details saved");
+      },
+
+      /** Manual stage correction — a phone call, or fixing a mis-step. Always logged. */
+      setLotStage: (orderId, lotId, stage, note) => {
+        set((s) => {
+          const lot = s.orders[orderId]?.lots.find((x) => x.id === lotId); if (!lot) return;
+          const before = lotStage(lot);
+          if (before === stage) return;
+          const back = stageIdx(stage) < stageIdx(before);
+          lot.stage = stage;
+          (lot.stageHistory ??= []).push({
+            id: uid("stg"), stage, at: stamp(), by: ME, manual: true,
+            note: note ?? (back
+              ? `Corrected back from ${before ? TESTING_STAGE_META[before].label : "—"} by the operator.`
+              : `Set manually${before ? ` from ${TESTING_STAGE_META[before].label}` : ""}.`),
+          });
+        });
+        toast.success(`Stage → ${TESTING_STAGE_META[stage].label}`);
+      },
+
       // Pull the report for a lot's work order and parse it on screen. Called again → next revision.
       fetchWhlReport: (orderId, lotId) => {
         const b0 = get().orders[orderId]; if (!b0) return;
@@ -565,6 +652,10 @@ export const useStore = create<Store>()(
               l.lastUpdateRequestAt = undefined;
               const pending = b.labEmails.filter((m) => m.lotId === lotId && m.direction === "OUT" && m.status === "AWAITING_RESPONSE");
               pending.forEach((m) => { m.status = "UPDATE_RECEIVED"; });
+              // lifecycle: the report landing is the end of the chain
+              moveStage(l, "REPORT_SHARED", WHL_BOT, {
+                note: `Report ${stored.reportNo} received — ${stored.conclusion.replace(/_/g, " ").toLowerCase()}${stored.anyFar ? " (a process came back F.A.R.)" : ""}.`,
+              });
             });
             const st = conclusionToLotStatus(rep.conclusion, rep.anyFar);
             if (st === "PASS") toast.success(`${rep.reportNo} — Acceptable`);
@@ -615,8 +706,11 @@ export const useStore = create<Store>()(
       // Inbound mail drives the tracker. Mails that can't be matched go to a manual-match queue.
       syncWhlInbox: (orderId) => {
         const b0 = get().orders[orderId]; if (!b0) return;
+        // the lot's current stage goes with the request so the lab answers with the
+        // mail that plausibly comes next, rather than one for a stage already passed
         const wos = b0.lots.filter((l) => !!l.workOrderNo).map((l) => ({
           workOrderNo: l.workOrderNo!, lotCode: l.lotCode, mpn: l.orderLineMpn, testNames: (l.tests ?? []).map((t) => t.name),
+          stage: lotStage(l),
         }));
         if (wos.length === 0) { toast.error("No WHL work orders on this order yet."); return; }
         toast.message("Checking the WHL mailbox…");
@@ -624,6 +718,7 @@ export const useStore = create<Store>()(
           try {
             const res = await whlPollInbox({ workOrders: wos });
             let matched = 0, unmatched = 0;
+            const advanced: string[] = [];
             set((s) => {
               const b = s.orders[orderId]; if (!b) return;
               b.labEmails ??= [];
@@ -652,11 +747,18 @@ export const useStore = create<Store>()(
                   t.history.push(auditRow({ by: WHL_BOT, action: "STATUS", target: u.name, before, after: u.status, note: u.note ?? msg.subject, sourceEmailId: em.id }));
                 }
                 if (msg.kind === "REPORT") lot.lastUpdateRequestAt = undefined;
+                // lifecycle: the mail says where the lot now is (receipt / started / in
+                // progress / report being written). Forward-only, so a late-arriving
+                // interim mail can't drag a finished lot back down the chain.
+                if (msg.stage && moveStage(lot, msg.stage, WHL_BOT, { note: msg.subject, sourceEmailId: em.id })) {
+                  advanced.push(`${lot.lotCode} → ${TESTING_STAGE_META[msg.stage].label}`);
+                }
                 b.labEmails.filter((x) => x.lotId === lot.id && x.direction === "OUT" && x.status === "AWAITING_RESPONSE")
                   .forEach((x) => { x.status = "UPDATE_RECEIVED"; });
               }
             });
-            toast.success(`${matched} update(s) applied${unmatched ? ` · ${unmatched} need manual matching` : ""}`);
+            if (advanced.length) toast.success(advanced.join(" · "));
+            else toast.success(`${matched} update(s) applied${unmatched ? ` · ${unmatched} need manual matching` : ""}`);
           } catch (e) { toast.error(`WHL inbox: ${errMsg(e)}`); }
         })();
       },

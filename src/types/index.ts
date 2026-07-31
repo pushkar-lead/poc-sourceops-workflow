@@ -10,6 +10,20 @@ export type TestingMode = "NONE" | "SUPPLIER_SELF" | "WHL";
 export type TestStatus = "PENDING" | "PASS" | "FAIL" | "MAYBE";
 // per-test (process) status on a lot — WHL's own vocabulary, incl. F.A.R. (Further Analysis Recommended)
 export type TestProcessStatus = "PENDING" | "IN_PROGRESS" | "PASSED" | "FAILED" | "NOT_CONDUCTED" | "FAR";
+
+/**
+ * Where a lot sits in the testing lifecycle. Ordered — a lot only ever moves
+ * forward through this chain (see TESTING_STAGES in data/enums).
+ */
+export type TestingStage =
+  | "TEST_REQUESTED"
+  | "SUPPLIER_DISPATCHING"
+  | "COMPONENTS_RECEIVED"
+  | "TESTING_STARTED"
+  | "TESTING_IN_PROGRESS"
+  | "TESTING_COMPLETED"
+  | "REPORT_PREPARATION"
+  | "REPORT_SHARED";
 // WHL report verdicts: per-process result and the report's overall conclusion
 export type WhlProcessResult = "ACCEPTABLE" | "NOT_ACCEPTABLE" | "FAR" | "NOT_CONDUCTED";
 export type WhlConclusion = "ACCEPTABLE" | "NOT_ACCEPTABLE" | "SUSPECT_COUNTERFEIT";
@@ -175,6 +189,22 @@ export interface TestAuditEntry {
   sourceEmailId?: string;     // inbound email that triggered an automated change
 }
 
+/**
+ * One recorded move along the testing lifecycle. Kept as a list rather than a
+ * single "current stage" so the tab can show WHEN each step happened and WHAT
+ * moved it — an operator, or an inbound WHL mail (with the mail linked).
+ */
+export interface TestingStageEvent {
+  id: string;
+  stage: TestingStage;
+  at: string;
+  by: string;                 // operator, "WHL inbox (auto)", or "Supplier (relayed)"
+  note?: string;
+  sourceEmailId?: string;     // the inbound mail that moved the stage
+  /** set when an operator moved the stage by hand instead of a mail driving it */
+  manual?: boolean;
+}
+
 /** A required test as parsed off the PO (never hand-typed unless the operator overrides). */
 export interface TestRequirement {
   id: string;
@@ -291,6 +321,21 @@ export interface LotNotification {
   note?: string;            // failure reason / masking or NDA caveat recorded at send time
 }
 
+/**
+ * The supplier → WHL shipment for a lot. The supplier tells us it's on the way
+ * (mail / call), we record it here so the lab-side clock is visible before WHL
+ * has confirmed anything.
+ */
+export interface LotDispatch {
+  courier?: string;
+  awb?: string;
+  dispatchedOn?: string;
+  expectedArrival?: string;
+  note?: string;
+  recordedBy: string;
+  recordedAt: string;
+}
+
 export interface Lot {
   id: string;
   orderLineMpn: string;
@@ -308,6 +353,9 @@ export interface Lot {
   tests?: LotTest[];          // inherited from the MPN's spec at lot creation
   reports?: WhlReport[];      // all versions; exactly one `current`
   lastUpdateRequestAt?: string; // SLA clock for an unanswered "Request Update"
+  stage?: TestingStage;       // where this lot sits in the testing lifecycle
+  stageHistory?: TestingStageEvent[]; // timestamped progression through the chain
+  dispatch?: LotDispatch;     // supplier → WHL leg, recorded when the supplier tells us
   notifications?: LotNotification[]; // result circulated to supplier / buyer / escrow / WHL
 }
 

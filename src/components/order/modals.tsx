@@ -70,6 +70,63 @@ export function AddLotModal({ orderId, onClose }: { orderId: string; onClose: ()
 }
 
 /**
+ * Record the supplier → WHL leg. The lab can't tell us a shipment exists until it
+ * lands, so this is the one lifecycle stage that has to come from us. Everything is
+ * optional except the fact of dispatch — chasing a supplier for an AWB shouldn't
+ * block the chain from showing the lot as on its way.
+ */
+export function RecordDispatchModal({
+  orderId, lotId, onClose,
+}: { orderId: string; lotId: string; onClose: () => void }) {
+  const lot = useStore((s) => s.orders[orderId]?.lots.find((l) => l.id === lotId));
+  const recordSupplierDispatch = useStore((s) => s.recordSupplierDispatch);
+  const [courier, setCourier] = useState(lot?.dispatch?.courier ?? "DHL Express");
+  const [awb, setAwb] = useState(lot?.dispatch?.awb ?? "");
+  const [dispatchedOn, setDispatchedOn] = useState(lot?.dispatch?.dispatchedOn ?? new Date().toISOString().slice(0, 10));
+  const [expectedArrival, setExpectedArrival] = useState(lot?.dispatch?.expectedArrival ?? "");
+  const [note, setNote] = useState(lot?.dispatch?.note ?? "");
+  if (!lot) return null;
+
+  const save = () => {
+    recordSupplierDispatch(orderId, lotId, {
+      courier: courier.trim() || undefined,
+      awb: awb.trim() || undefined,
+      dispatchedOn: dispatchedOn || undefined,
+      expectedArrival: expectedArrival || undefined,
+      note: note.trim() || undefined,
+    });
+    onClose();
+  };
+
+  return (
+    <Dialog open onClose={onClose} title="Record supplier dispatch to WHL"
+      footer={<Footer onClose={onClose} onSave={save} saveLabel="Record dispatch" />}>
+      <div className="space-y-3">
+        <div className="rounded-lg bg-muted p-2.5 text-xs text-muted-foreground">
+          <b className="text-foreground">{lot.lotCode}</b> · <span className="font-mono">{lot.orderLineMpn}</span> · sample {lot.sampleQty} of {lot.qty}
+          {lot.workOrderNo ? <> · WO {lot.workOrderNo}</> : null} → <b className="text-foreground">{lot.lab ?? "WHL"}</b>
+          <p className="mt-1">Moves the lot to <b className="text-foreground">Supplier Dispatching Components</b>. WHL&apos;s receipt confirmation then advances it again on the next inbox sync.</p>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Labeled label="Courier"><Input value={courier} onChange={(e) => setCourier(e.target.value)} placeholder="DHL Express" /></Labeled>
+          <Labeled label="AWB / tracking no" hint="optional — leave blank if the supplier hasn't shared it">
+            <Input value={awb} onChange={(e) => setAwb(e.target.value)} placeholder="1Z-…" />
+          </Labeled>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Labeled label="Dispatched on"><Input type="date" value={dispatchedOn} onChange={(e) => setDispatchedOn(e.target.value)} /></Labeled>
+          <Labeled label="Expected at lab" hint="optional"><Input type="date" value={expectedArrival} onChange={(e) => setExpectedArrival(e.target.value)} /></Labeled>
+        </div>
+        <Labeled label="Note" hint="how the supplier told us — mail, call, portal">
+          <Textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)}
+            placeholder="Supplier confirmed by mail; samples drawn from the same date-code reel." />
+        </Labeled>
+      </div>
+    </Dialog>
+  );
+}
+
+/**
  * Compose to WHL — pre-filled with the lot's MPN / lot code / PO / work order so the
  * operator never has to look up WHL's address or reference numbers. In-app send logs
  * the message against the lot; "mailto" is offered as the quick fallback.

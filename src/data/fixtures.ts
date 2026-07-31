@@ -2,6 +2,7 @@ import type {
   Order, OrderBundle, JourneyStep, JourneyPhase, Lot, Escrow, Payment,
   Shipment, CustomsEntry, DeliveryAllocation, SourcingAllocation, DocumentRef, Approval, OrderEvent, OrderLine, ClientPO, SupplierPO, TestingMode, Address,
   MpnTestSpec, LabEmail, LotTest, WhlReport, TestProcessStatus, TestAuditEntry, LotNotification,
+  TestingStage, TestingStageEvent,
 } from "@/types";
 import { WHL_CONFIDENTIALITY } from "@/data/enums";
 import { ORDER_DETAILS } from "@/data/order-details";
@@ -397,17 +398,68 @@ const LOT_A_NOTIFICATIONS: LotNotification[] = [
     note: "Release-trigger evidence for the escrow provider. Report shared under NDA — internal use by the recipient only." },
 ];
 
+// Testing lifecycle history. LOT-A and LOT-B have run the full chain (their reports are
+// in), while LOT-C is still mid-bench — so the tab shows both a closed-out lot and one
+// in flight. Note the gap on LOT-A between "Testing Completed" and "Test Report Shared":
+// the bench finished on the 24th, the signed report only landed on the 25th.
+const stg = (
+  id: string, stage: TestingStage, at: string, by: string, note?: string, o: Partial<TestingStageEvent> = {},
+): TestingStageEvent => ({ id, stage, at, by, note, ...o });
+
+const WHL_AUTO = "WHL inbox (auto)";
+
+const LOT_A_STAGES: TestingStageEvent[] = [
+  stg("sg-a1", "TEST_REQUESTED", "2026-07-19 09:40", "A. Sharma", "Work order 352146 raised with WHL Shenzhen — quoted TAT 5 days."),
+  stg("sg-a2", "SUPPLIER_DISPATCHING", "2026-07-19 15:10", "Supplier (relayed)", "DHL Express · AWB 4471-9920-11 · dispatched 2026-07-19 — supplier confirmed by mail."),
+  stg("sg-a3", "COMPONENTS_RECEIVED", "2026-07-21 09:00", WHL_AUTO, "Receipt confirmation — WO 352146 / Lot LOT-A"),
+  stg("sg-a4", "TESTING_STARTED", "2026-07-21 14:25", WHL_AUTO, "Testing commenced — WO 352146 / Lot LOT-A"),
+  stg("sg-a5", "TESTING_IN_PROGRESS", "2026-07-23 11:10", WHL_AUTO, "Interim status — WO 352146 / Lot LOT-A"),
+  stg("sg-a6", "TESTING_COMPLETED", "2026-07-24 09:05", WHL_AUTO, "Testing complete — all six processes conducted; results with the reviewer."),
+  // three days between the bench finishing and the signed report landing (re-test on the flagged units)
+  stg("sg-a7", "REPORT_PREPARATION", "2026-07-24 11:30", WHL_AUTO, "Report in preparation — with the laboratory manager for sign-off."),
+  stg("sg-a8", "REPORT_SHARED", "2026-07-25 16:05", WHL_AUTO, "Revised report 352146.2 received — acceptable (electrical re-test cleared the flagged units).", { sourceEmailId: "em-5" }),
+];
+
+const LOT_B_STAGES: TestingStageEvent[] = [
+  stg("sg-b1", "TEST_REQUESTED", "2026-07-21 10:15", "A. Sharma", "Work order 352147 raised with WHL Shenzhen — quoted TAT 6 days."),
+  stg("sg-b2", "SUPPLIER_DISPATCHING", "2026-07-21 17:40", "Supplier (relayed)", "DHL Express · AWB 4471-9931-08 · dispatched 2026-07-21."),
+  stg("sg-b3", "COMPONENTS_RECEIVED", "2026-07-23 08:50", WHL_AUTO, "Receipt confirmation — WO 352147 / Lot LOT-B"),
+  stg("sg-b4", "TESTING_STARTED", "2026-07-23 13:05", WHL_AUTO, "Testing commenced — WO 352147 / Lot LOT-B"),
+  stg("sg-b5", "TESTING_IN_PROGRESS", "2026-07-24 16:20", WHL_AUTO, "Interim status — WO 352147 / Lot LOT-B"),
+  stg("sg-b6", "TESTING_COMPLETED", "2026-07-25 10:00", WHL_AUTO, "Testing complete — all four processes conducted on Lot LOT-B."),
+  stg("sg-b7", "REPORT_PREPARATION", "2026-07-25 15:20", WHL_AUTO, "Report in preparation — WO 352147 / Lot LOT-B"),
+  stg("sg-b8", "REPORT_SHARED", "2026-07-26 14:40", WHL_AUTO, "Report 352147.1 received — acceptable (a process came back F.A.R., follow-up open).", { sourceEmailId: "em-4" }),
+];
+
+const LOT_C_STAGES: TestingStageEvent[] = [
+  stg("sg-c1", "TEST_REQUESTED", "2026-07-26 09:00", "A. Sharma", "Work order 352151 raised with WHL Hong Kong — quoted TAT 6 days."),
+  stg("sg-c2", "SUPPLIER_DISPATCHING", "2026-07-26 12:30", "Supplier (relayed)", "FedEx IP · AWB 7788-0021-45 · dispatched 2026-07-26 · ETA 2026-07-27."),
+  stg("sg-c3", "COMPONENTS_RECEIVED", "2026-07-27 09:15", WHL_AUTO, "Receipt confirmation — WO 352151 / Lot LOT-C"),
+  stg("sg-c4", "TESTING_STARTED", "2026-07-27 10:15", WHL_AUTO, "Testing commenced — WO 352151 / Lot LOT-C"),
+  // matches LOT_C_TESTS: intake inspection is already IN_PROGRESS on the tracker
+  stg("sg-c5", "TESTING_IN_PROGRESS", "2026-07-27 10:15", WHL_AUTO, "Interim mail — intake complete, documentation & packaging inspection underway.", { sourceEmailId: "em-3" }),
+];
+
 const HERO_LOTS: Lot[] = [
   { id: "lot-a", orderLineMpn: "STM32F407VGT6", lotCode: "LOT-A", dateCode: "2325", qty: 300, sampleQty: 20,
     testStatus: "PASS", lab: "WHL Shenzhen", workOrderNo: "352146", reportNo: "352146.2", tatDays: 5, testedAt: "2026-07-25",
-    clientPoNo: "ACME-PO-3391", tests: LOT_A_TESTS, reports: [REPORT_A1, REPORT_A2], notifications: LOT_A_NOTIFICATIONS },
+    clientPoNo: "ACME-PO-3391", tests: LOT_A_TESTS, reports: [REPORT_A1, REPORT_A2], notifications: LOT_A_NOTIFICATIONS,
+    stage: "REPORT_SHARED", stageHistory: LOT_A_STAGES,
+    dispatch: { courier: "DHL Express", awb: "4471-9920-11", dispatchedOn: "2026-07-19", expectedArrival: "2026-07-21",
+      note: "Supplier confirmed by mail; samples drawn from the same date-code reel.", recordedBy: "A. Sharma", recordedAt: "2026-07-19 15:10" } },
   { id: "lot-b", orderLineMpn: "TPS54560DDAR", lotCode: "LOT-B", dateCode: "2410", qty: 150, sampleQty: 20,
     testStatus: "MAYBE", lab: "WHL Shenzhen", workOrderNo: "352147", reportNo: "352147.1", tatDays: 6, testedAt: "2026-07-26",
-    clientPoNo: "ACME-PO-3391", tests: LOT_B_TESTS, reports: [REPORT_B1] },
+    clientPoNo: "ACME-PO-3391", tests: LOT_B_TESTS, reports: [REPORT_B1],
+    stage: "REPORT_SHARED", stageHistory: LOT_B_STAGES,
+    dispatch: { courier: "DHL Express", awb: "4471-9931-08", dispatchedOn: "2026-07-21", expectedArrival: "2026-07-23",
+      recordedBy: "A. Sharma", recordedAt: "2026-07-21 17:40" } },
   // no report yet → "Not Available" + Request Update; the chase is already past the 3-business-day SLA
   { id: "lot-c", orderLineMpn: "TPS54560DDAR", lotCode: "LOT-C", dateCode: "2412", qty: 100, sampleQty: 15,
     testStatus: "PENDING", lab: "WHL Hong Kong", workOrderNo: "352151", tatDays: 6,
-    clientPoNo: "ACME-PO-3391", tests: LOT_C_TESTS, reports: [], lastUpdateRequestAt: "2026-07-24" },
+    clientPoNo: "ACME-PO-3391", tests: LOT_C_TESTS, reports: [], lastUpdateRequestAt: "2026-07-24",
+    stage: "TESTING_IN_PROGRESS", stageHistory: LOT_C_STAGES,
+    dispatch: { courier: "FedEx IP", awb: "7788-0021-45", dispatchedOn: "2026-07-26", expectedArrival: "2026-07-27",
+      recordedBy: "A. Sharma", recordedAt: "2026-07-26 12:30" } },
 ];
 
 const HERO_LAB_EMAILS: LabEmail[] = [

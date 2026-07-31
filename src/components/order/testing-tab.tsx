@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Plus, Trash2, Pencil, History, Wand2, RefreshCw, Mail, MailQuestion, FileText, Download, Eye,
@@ -10,7 +10,7 @@ import {
 import type { OrderBundle, Lot, LotTest, WhlReport, LabEmail, TestProcessStatus, NotifyParty } from "@/types";
 import {
   TEST_STANDARDS, WHL_PROCESSES, TEST_PROCESS_STATUSES, WHL_CONTACT, WHL_SLA_BUSINESS_DAYS,
-  WHL_EMAIL_TEMPLATES, statusTone,
+  WHL_EMAIL_TEMPLATES, statusTone, stageLabel,
 } from "@/data/enums";
 import { Panel, Pill, StatusPill, Button, Progress, Field } from "@/components/ui/primitives";
 import { Select } from "@/components/ui/form";
@@ -18,10 +18,11 @@ import { useStore } from "@/store/store";
 import { useRole } from "@/lib/role";
 import {
   escrowRemaining, specForMpn, lotTestProgress, currentReport, lotEmails, unmatchedEmails,
-  testAutofillGaps, overdueUpdateRequests, reconciliationAlerts, testingSummary, lotResults,
+  testAutofillGaps, overdueUpdateRequests, reconciliationAlerts, testingSummary, lotResults, lotStageProgress,
 } from "@/store/selectors";
 import { qtyfmt, cn } from "@/lib/utils";
-import { ComposeWhlEmailModal, MatchLabEmailModal, NotifyLotResultModal, BulkNotifyModal } from "@/components/order/modals";
+import { ComposeWhlEmailModal, MatchLabEmailModal, NotifyLotResultModal, BulkNotifyModal, RecordDispatchModal } from "@/components/order/modals";
+import { TestingStageChain, TestingStageBar } from "@/components/order/testing-stages";
 
 type Sub = "mpns" | "lots" | "mail";
 
@@ -51,6 +52,56 @@ function Notice({ tone, icon, children, action }: { tone: "warn" | "bad" | "info
 /** Current (or newest) report for a lot — used in the scope banner. */
 const report0 = (lot: Lot) => currentReport(lot);
 
+/**
+ * Card that starts collapsed. An order can carry 100 lots; rendering every card open
+ * makes the tab unscrollable and the 100th lot unreachable. The summary row stays
+ * visible while collapsed so you can still scan for the one you want, and the bulky
+ * actions only appear once it's open.
+ */
+function CollapsibleCard({
+  open, onToggle, title, summary, actions, children,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  title: React.ReactNode;
+  summary?: React.ReactNode;
+  actions?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-[var(--radius)] border bg-card shadow-sm">
+      <div className={cn("flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3", open && "border-b")}>
+        <button onClick={onToggle} aria-expanded={open}
+          title={open ? "Minimize" : "Expand"}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left hover:text-primary">
+          {open ? <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />}
+          <h3 className="min-w-0 text-xs font-semibold uppercase tracking-wider text-muted-foreground">{title}</h3>
+        </button>
+        {summary && <div className="flex flex-wrap items-center gap-2 text-xs">{summary}</div>}
+        {open && actions}
+      </div>
+      {open && <div className="p-4">{children}</div>}
+    </div>
+  );
+}
+
+/** "3 of 12 expanded · collapse all" strip above a list of collapsible cards. */
+function ExpandBar({
+  total, openCount, noun, onCollapseAll, onExpandAll,
+}: { total: number; openCount: number; noun: string; onCollapseAll: () => void; onExpandAll?: () => void }) {
+  if (total === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+      <span>{total} {noun}{total === 1 ? "" : "s"} · {openCount} expanded</span>
+      {openCount > 0 && <button onClick={onCollapseAll} className="font-medium text-primary hover:underline">collapse all</button>}
+      {onExpandAll && openCount < total && total <= 12 && (
+        <button onClick={onExpandAll} className="font-medium text-primary hover:underline">expand all</button>
+      )}
+      <span className="text-faint">click a row to open it</span>
+    </div>
+  );
+}
+
 function Denied({ what }: { what: string }) {
   return <span className="inline-flex items-center gap-1 text-[11px] text-faint"><Lock className="h-3 w-3" /> {what} needs the SC or Mgmt persona</span>;
 }
@@ -64,6 +115,8 @@ export function TestingTab({
   const [bulk, setBulk] = useState<NotifyParty | null>(null);
   const [sel, setSel] = useState<string[]>([]);   // lot ids ticked for a combined action
   const [match, setMatch] = useState<LabEmail | null>(null);
+  const [dispatch, setDispatch] = useState<string | null>(null); // lot id whose dispatch is being recorded
+  const [track, setTrack] = useState<string | null>(null);       // lot id whose lifecycle is expanded in the roll-up
   const { canEditTests, canEmailLab } = useRole();
 
   const autofillMpnTests = useStore((s) => s.autofillMpnTests);
@@ -121,6 +174,7 @@ export function TestingTab({
               <span className="font-mono text-muted-foreground">{scoped.orderLineMpn}</span>
               <span className="text-faint">{scoped.lab ?? "—"} · WO {scoped.workOrderNo ?? "—"} · qty {qtyfmt(scoped.qty)} / sample {scoped.sampleQty}</span>
               <StatusPill status={scoped.testStatus} />
+              <TestingStageBar lot={scoped} className="w-48" />
               {report0(scoped) && <span className="text-muted-foreground">report <b className="text-foreground">{report0(scoped)!.reportNo}</b> — {report0(scoped)!.conclusion.replace(/_/g, " ").toLowerCase()}</span>}
               <button onClick={() => setScope("ALL")} className="font-medium text-primary underline">show order total</button>
             </span>
@@ -180,11 +234,13 @@ export function TestingTab({
                   <th className="px-3 py-2 text-center">Not acc.</th>
                   <th className="px-3 py-2 text-left">Current report</th>
                   <th className="px-3 py-2 text-left">Outstanding</th>
+                  <th className="px-3 py-2 text-left">Progress</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((r) => (
-                  <tr key={r.lot.id} onClick={() => setScope(r.lot.id === scope ? "ALL" : r.lot.id)}
+                  <Fragment key={r.lot.id}>
+                  <tr onClick={() => setScope(r.lot.id === scope ? "ALL" : r.lot.id)}
                     className={cn("cursor-pointer border-b last:border-0 hover:bg-muted/60", r.lot.id === scope && "bg-accent-soft/60")}>
                     <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
                       <input type="checkbox" aria-label={`Select ${r.lot.lotCode}`} checked={sel.includes(r.lot.id)}
@@ -218,7 +274,21 @@ export function TestingTab({
                       {r.overdueDays > 0 && <span className="ml-1 text-bad">· chase {r.overdueDays}d overdue</span>}
                       {r.awaiting > 0 && r.overdueDays === 0 && <span className="ml-1 text-muted-foreground">· awaiting reply</span>}
                     </td>
+                    {/* track progress without leaving the roll-up — expands the lifecycle in place */}
+                    <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+                      <LotProgressToggle lot={r.lot} open={track === r.lot.id}
+                        onToggle={() => setTrack(track === r.lot.id ? null : r.lot.id)} />
+                    </td>
                   </tr>
+                  {track === r.lot.id && (
+                    <tr className="border-b last:border-0 bg-card-2/60">
+                      <td colSpan={10} className="px-3 py-3">
+                        <TestingStageChain orderId={id} lot={r.lot} canEdit={canEditTests}
+                          onRecordDispatch={() => setDispatch(r.lot.id)} />
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>
@@ -298,14 +368,34 @@ export function TestingTab({
 
       {sub === "mpns" && <MpnTestsSection b={b} id={id} canEdit={canEditTests} onlyMpn={scoped?.orderLineMpn} />}
       {sub === "lots" && <LotsSection b={b} id={id} onlyLotId={lotId} canEdit={canEditTests} canEmail={canEmailLab}
-        onCompose={(l, t) => setCompose({ lotId: l, templateId: t })} onNotify={(l, p) => setNotify({ lotId: l, party: p })} />}
+        onCompose={(l, t) => setCompose({ lotId: l, templateId: t })} onNotify={(l, p) => setNotify({ lotId: l, party: p })}
+        onDispatch={setDispatch} />}
       {sub === "mail" && <MailSection key={lotId ?? "ALL"} b={b} id={id} defaultLotId={lotId} canEmail={canEmailLab} onCompose={(l, t) => setCompose({ lotId: l, templateId: t })} onMatch={setMatch} />}
 
       {compose && <ComposeWhlEmailModal orderId={id} lotId={compose.lotId} templateId={compose.templateId} onClose={() => setCompose(null)} />}
       {notify && <NotifyLotResultModal orderId={id} lotId={notify.lotId} party={notify.party} onClose={() => setNotify(null)} />}
       {bulk && <BulkNotifyModal orderId={id} lotIds={sel} party={bulk} onClose={() => setBulk(null)} />}
       {match && <MatchLabEmailModal orderId={id} email={match} onClose={() => setMatch(null)} />}
+      {dispatch && <RecordDispatchModal orderId={id} lotId={dispatch} onClose={() => setDispatch(null)} />}
     </div>
+  );
+}
+
+/**
+ * "Track progress" control on a roll-up row: shows where the lot is at a glance and
+ * expands the full lifecycle stepper underneath without navigating away.
+ */
+function LotProgressToggle({ lot, open, onToggle }: { lot: Lot; open: boolean; onToggle: () => void }) {
+  const { stage, done, total, complete } = lotStageProgress(lot);
+  return (
+    <button onClick={onToggle}
+      title={open ? "Hide the testing lifecycle" : "Track progress — show the testing lifecycle for this lot"}
+      className={cn("inline-flex max-w-[13rem] items-center gap-1.5 rounded-md border px-2 py-1 text-left text-[11px] transition hover:border-primary hover:text-primary",
+        open && "border-primary bg-accent-soft text-primary")}>
+      {open ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
+      <span className="truncate">{stage ? stageLabel(stage) : "Not started"}</span>
+      <span className={cn("shrink-0 tnum", complete ? "text-ok" : "text-faint")}>{Math.max(0, done)}/{total}</span>
+    </button>
   );
 }
 
@@ -329,6 +419,16 @@ function MpnTestsSection({ b, id, canEdit, onlyMpn }: { b: OrderBundle; id: stri
   const [openAudit, setOpenAudit] = useState<string | null>(null);
   const [name, setName] = useState<string>(WHL_PROCESSES[0]);
   const [standard, setStandard] = useState<string>("AS6081");
+  const [openMpns, setOpenMpns] = useState<Set<string>>(new Set());
+
+  const shown = b.lines.filter((l) => !onlyMpn || l.mpn === onlyMpn);
+  // filtering to one MPN is already a request to see it — don't make them click twice
+  const isOpen = (mpn: string) => openMpns.has(mpn) || shown.length === 1;
+  const toggle = (mpn: string) => setOpenMpns((p) => {
+    const n = new Set(p);
+    if (n.has(mpn)) n.delete(mpn); else n.add(mpn);
+    return n;
+  });
 
   return (
     <div className="space-y-3">
@@ -337,24 +437,37 @@ function MpnTestsSection({ b, id, canEdit, onlyMpn }: { b: OrderBundle; id: stri
         Manual edits are allowed as an override and every one is logged (who · when · before → after).
       </p>
       {onlyMpn && <p className="text-xs text-muted-foreground">Filtered to <span className="font-mono text-foreground">{onlyMpn}</span> — the MPN of the lot selected above.</p>}
-      {b.lines.length === 0 ? <Empty text="No order lines." /> : b.lines.filter((l) => !onlyMpn || l.mpn === onlyMpn).map((line) => {
+      {shown.length > 1 && (
+        <ExpandBar total={shown.length} openCount={shown.filter((l) => openMpns.has(l.mpn)).length} noun="MPN"
+          onCollapseAll={() => setOpenMpns(new Set())}
+          onExpandAll={() => setOpenMpns(new Set(shown.map((l) => l.mpn)))} />
+      )}
+      {b.lines.length === 0 ? <Empty text="No order lines." /> : shown.map((line) => {
         const spec = specForMpn(b, line.mpn);
         const failed = spec?.autofill === "FAILED";
         const none = line.testingMode === "NONE";
         const isEditing = editing === line.mpn;
         const lotsOfMpn = b.lots.filter((l) => l.orderLineMpn === line.mpn);
+        const open = isOpen(line.mpn);
         return (
-          <Panel key={line.id}
+          <CollapsibleCard key={line.id} open={open} onToggle={() => toggle(line.mpn)}
             title={<span className="flex flex-wrap items-center gap-2">
               <span className="font-mono text-xs normal-case text-foreground">{line.mpn}</span>
               <Pill tone={none ? "neutral" : "info"}>{line.testingMode}</Pill>
               <span className="font-normal normal-case tracking-normal text-faint">{line.make} · qty {qtyfmt(line.quantity)} · {lotsOfMpn.length} lot(s)</span>
             </span>}
+            summary={<>
+              {!spec ? <Pill tone="warn">not parsed</Pill>
+                : failed ? <Pill tone="bad">auto-fill failed</Pill>
+                : <Pill tone="ok">auto-filled</Pill>}
+              {/* enough to triage while collapsed: how many tests, and whether a human touched them */}
+              <span className="text-muted-foreground tnum">{spec?.tests.length ?? 0} test{(spec?.tests.length ?? 0) === 1 ? "" : "s"}</span>
+              {(spec?.tests.filter((t) => t.source === "MANUAL").length ?? 0) > 0 && (
+                <span className="text-faint">{spec!.tests.filter((t) => t.source === "MANUAL").length} manual</span>
+              )}
+            </>}
             actions={
               <div className="flex items-center gap-2">
-                {!spec ? <Pill tone="warn">not parsed</Pill>
-                  : failed ? <Pill tone="bad">auto-fill failed</Pill>
-                  : <Pill tone="ok">auto-filled</Pill>}
                 <Button variant="ghost" onClick={() => setOpenAudit(openAudit === line.mpn ? null : line.mpn)} title="Audit trail">
                   <History className="h-4 w-4" /> {spec?.audit.length ?? 0}
                 </Button>
@@ -449,7 +562,7 @@ function MpnTestsSection({ b, id, canEdit, onlyMpn }: { b: OrderBundle; id: stri
                 )}
               </div>
             )}
-          </Panel>
+          </CollapsibleCard>
         );
       })}
     </div>
@@ -459,14 +572,32 @@ function MpnTestsSection({ b, id, canEdit, onlyMpn }: { b: OrderBundle; id: stri
 // ==================== 2 · lots: status tracker + report repository ====================
 
 function LotsSection({
-  b, id, onlyLotId, canEdit, canEmail, onCompose, onNotify,
-}: { b: OrderBundle; id: string; onlyLotId?: string; canEdit: boolean; canEmail: boolean; onCompose: (lotId: string, templateId?: string) => void; onNotify: (lotId: string, party: NotifyParty) => void }) {
+  b, id, onlyLotId, canEdit, canEmail, onCompose, onNotify, onDispatch,
+}: { b: OrderBundle; id: string; onlyLotId?: string; canEdit: boolean; canEmail: boolean; onCompose: (lotId: string, templateId?: string) => void; onNotify: (lotId: string, party: NotifyParty) => void; onDispatch: (lotId: string) => void }) {
+  const [openLots, setOpenLots] = useState<Set<string>>(new Set());
   if (b.lots.length === 0) return <Empty text="No lots yet — add one to start a WHL / self-test record." />;
   const lots = onlyLotId ? b.lots.filter((l) => l.id === onlyLotId) : b.lots;
+  // scoping to a single lot is already a request to see it — don't make them click twice
+  const isOpen = (lotId: string) => openLots.has(lotId) || lots.length === 1;
+  const toggle = (lotId: string) => setOpenLots((p) => {
+    const n = new Set(p);
+    if (n.has(lotId)) n.delete(lotId); else n.add(lotId);
+    return n;
+  });
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {onlyLotId && <p className="text-xs text-muted-foreground">Filtered to one lot — switch the lot selector above to <b className="text-foreground">All lots</b> to see the rest.</p>}
-      {lots.map((lot) => <LotCard key={lot.id} b={b} id={id} lot={lot} canEdit={canEdit} canEmail={canEmail} onCompose={onCompose} onNotify={onNotify} />)}
+      {lots.length > 1 && (
+        <ExpandBar total={lots.length} openCount={lots.filter((l) => openLots.has(l.id)).length} noun="lot"
+          onCollapseAll={() => setOpenLots(new Set())}
+          onExpandAll={() => setOpenLots(new Set(lots.map((l) => l.id)))} />
+      )}
+      {lots.map((lot) => (
+        <LotCard key={lot.id} b={b} id={id} lot={lot} canEdit={canEdit} canEmail={canEmail}
+          open={isOpen(lot.id)} onToggle={() => toggle(lot.id)}
+          onCompose={onCompose} onNotify={onNotify} onDispatch={onDispatch} />
+      ))}
     </div>
   );
 }
@@ -581,18 +712,24 @@ function NextActionsMenu({
 }
 
 function LotCard({
-  b, id, lot, canEdit, canEmail, onCompose, onNotify,
-}: { b: OrderBundle; id: string; lot: Lot; canEdit: boolean; canEmail: boolean; onCompose: (lotId: string, templateId?: string) => void; onNotify: (lotId: string, party: NotifyParty) => void }) {
+  b, id, lot, canEdit, canEmail, open, onToggle, onCompose, onNotify, onDispatch,
+}: { b: OrderBundle; id: string; lot: Lot; canEdit: boolean; canEmail: boolean; open: boolean; onToggle: () => void; onCompose: (lotId: string, templateId?: string) => void; onNotify: (lotId: string, party: NotifyParty) => void; onDispatch: (lotId: string) => void }) {
   const setLotStatus = useStore((s) => s.setLotStatus);
   const fetchWhlReport = useStore((s) => s.fetchWhlReport);
   const requestWhlUpdate = useStore((s) => s.requestWhlUpdate);
+  const [showSent, setShowSent] = useState(false); // notification trail is collapsed by default
   const p = lotTestProgress(lot);
   const report = currentReport(lot);
   const emails = lotEmails(b, lot.id);
   const awaiting = emails.some((m) => m.direction === "OUT" && m.status === "AWAITING_RESPONSE");
 
+  const stg = lotStageProgress(lot);
+  const blocker = p.failed > 0 ? "not acceptable" : p.far > 0 ? "F.A.R." : p.notConducted > 0 ? "not conducted" : null;
+
   return (
-    <Panel
+    <CollapsibleCard
+      open={open}
+      onToggle={onToggle}
       title={<span className="flex flex-wrap items-center gap-2">
         <FlaskConical className="h-4 w-4 text-primary" />
         <span className="text-foreground">{lot.lotCode}</span>
@@ -601,8 +738,18 @@ function LotCard({
           {lot.lab ?? "—"} · WO {lot.workOrderNo ?? "—"} · qty {qtyfmt(lot.qty)} / sample {lot.sampleQty} · DC {lot.dateCode}
         </span>
       </span>}
-      actions={<div className="flex flex-wrap items-center gap-2">
+      // enough while collapsed to spot the lot that needs attention among a hundred
+      summary={<>
         <StatusPill status={lot.testStatus} />
+        <span className="text-muted-foreground tnum">{p.settled}/{p.total} tests</span>
+        <span className={cn("tnum", stg.complete ? "text-ok" : "text-faint")} title={stg.stage ? stageLabel(stg.stage) : "Not started"}>
+          {stg.stage ? stageLabel(stg.stage) : "not started"} {Math.max(0, stg.done)}/{stg.total}
+        </span>
+        {report ? <span className="font-mono text-faint">{report.reportNo}</span> : <span className="text-warn">no report</span>}
+        {blocker && <Pill tone={p.failed > 0 ? "bad" : "warn"}>{blocker}</Pill>}
+        {awaiting && <span title="Awaiting a WHL reply"><Clock className="h-3.5 w-3.5 text-warn" /></span>}
+      </>}
+      actions={<div className="flex flex-wrap items-center gap-2">
         <NextActionsMenu b={b} id={id} lot={lot} canEmail={canEmail} onNotify={onNotify} />
         <Button variant="outline" onClick={() => fetchWhlReport(id, lot.id)} title="Fetch & parse the WHL report for this work order">
           <FileText className="h-4 w-4" /> {report ? "Fetch revision" : "Fetch report"}
@@ -611,6 +758,11 @@ function LotCard({
           <Mail className="h-4 w-4" /> Email WHL
         </Button>
       </div>}>
+
+      {/* ---- lifecycle chain: where the lot physically is, before what was tested ---- */}
+      <div className="mb-4">
+        <TestingStageChain orderId={id} lot={lot} canEdit={canEdit} onRecordDispatch={() => onDispatch(lot.id)} />
+      </div>
 
       {/* ---- 3 · per-test status tracker ---- */}
       <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
@@ -656,6 +808,7 @@ function LotCard({
             <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Result circulated</span>
             <span className="text-[11px] text-faint">use <b className="text-foreground">Next actions</b> above to send</span>
           </div>
+          {/* the pills are the summary; the message-by-message trail is behind the toggle below */}
           <div className="flex flex-wrap gap-1.5">
             {(["SUPPLIER", "BUYER", "ESCROW", "WHL"] as NotifyParty[]).map((p) => {
               const n = (lot.notifications ?? []).find((x) => x.party === p);
@@ -669,15 +822,25 @@ function LotCard({
             })}
           </div>
           {(lot.notifications ?? []).length > 0 && (
-            <ol className="mt-2 space-y-1 text-[11px] text-muted-foreground">
-              {(lot.notifications ?? []).map((n) => (
-                <li key={n.id}>
-                  <span className="tnum text-faint">{n.at}</span> · {n.party.toLowerCase()} → <span className="font-mono">{n.to}</span> · {n.subject}
-                  {n.attachments?.length ? ` · ${n.attachments.join(", ")}` : ""}
-                  {n.status === "FAILED" && <span className="text-bad"> · {n.note}</span>}
-                </li>
-              ))}
-            </ol>
+            <div className="mt-2">
+              <button onClick={() => setShowSent((v) => !v)}
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-muted-foreground hover:text-primary"
+                aria-expanded={showSent}>
+                {showSent ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                {showSent ? "Hide" : "Show"} history ({(lot.notifications ?? []).length})
+              </button>
+              {showSent && (
+                <ol className="mt-2 space-y-1 text-[11px] text-muted-foreground">
+                  {(lot.notifications ?? []).map((n) => (
+                    <li key={n.id}>
+                      <span className="tnum text-faint">{n.at}</span> · {n.party.toLowerCase()} → <span className="font-mono">{n.to}</span> · {n.subject}
+                      {n.attachments?.length ? ` · ${n.attachments.join(", ")}` : ""}
+                      {n.status === "FAILED" && <span className="text-bad"> · {n.note}</span>}
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -718,7 +881,7 @@ function LotCard({
           )}
         </div>
       </div>
-    </Panel>
+    </CollapsibleCard>
   );
 }
 
@@ -943,6 +1106,19 @@ function MailSection({
   const [lotFilter, setLotFilter] = useState<string>(defaultLotId ?? "ALL");
   const thread = (b.labEmails ?? []).filter((m) => !!m.lotId && (lotFilter === "ALL" || m.lotId === lotFilter));
 
+  // A long-running lot accumulates dozens of mails. Show the two most recent (the thread
+  // is newest-first) and keep the rest one click away, with each body clamped until asked for.
+  const RECENT_MAILS = 2;
+  const [showAllMail, setShowAllMail] = useState(false);
+  const [openMails, setOpenMails] = useState<Set<string>>(new Set());
+  const visible = showAllMail ? thread : thread.slice(0, RECENT_MAILS);
+  const hidden = Math.max(0, thread.length - RECENT_MAILS);
+  const toggleMail = (mid: string) => setOpenMails((p) => {
+    const n = new Set(p);
+    if (n.has(mid)) n.delete(mid); else n.add(mid);
+    return n;
+  });
+
   return (
     <div className="space-y-4">
       <Panel title="Compose from a template — subject & body pre-filled">
@@ -998,36 +1174,69 @@ function MailSection({
           </Select>
         }>
         {thread.length === 0 ? <Empty text="No correspondence with WHL yet." /> : (
-          <ol className="space-y-3">
-            {thread.map((m) => (
-              <li key={m.id} className="flex gap-3">
-                <div className={cn("mt-1.5 h-2 w-2 shrink-0 rounded-full", m.direction === "OUT" ? "bg-primary" : "bg-ok")} />
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Pill tone={m.direction === "OUT" ? "info" : "neutral"}>{m.direction === "OUT" ? "sent" : "received"}</Pill>
-                    <StatusPill status={m.status} />
-                    <span className="text-xs text-faint tnum">{m.at}</span>
-                    {m.lotCode && <span className="text-xs text-muted-foreground">{m.lotCode} · <span className="font-mono">{m.mpn}</span>{m.workOrderNo ? ` · WO ${m.workOrderNo}` : ""}</span>}
-                  </div>
-                  <div className="text-sm font-medium">{m.subject}</div>
-                  <p className="whitespace-pre-wrap text-xs text-muted-foreground">{m.body}</p>
-                  <div className="mt-1 flex flex-wrap items-center gap-3 text-[11px] text-faint">
-                    <span>{m.by}</span>
-                    {m.attachments?.length ? <span className="inline-flex items-center gap-1"><FileText className="h-3 w-3" /> {m.attachments.join(", ")}</span> : null}
-                    {m.matchedBy && <span>matched by {m.matchedBy}</span>}
-                    {m.direction === "OUT" && m.status === "AWAITING_RESPONSE" && (
-                      <button className="underline" onClick={() => escalateLabEmail(id, m.id)}>Mark escalated</button>
-                    )}
-                  </div>
-                </div>
-              </li>
-            ))}
-          </ol>
+          <>
+            <ol className="space-y-3">
+              {visible.map((m) => (
+                <MailRow key={m.id} m={m} orderId={id} onEscalate={escalateLabEmail}
+                  expanded={openMails.has(m.id)} onToggle={() => toggleMail(m.id)} />
+              ))}
+            </ol>
+            {hidden > 0 && (
+              <button onClick={() => setShowAllMail((v) => !v)}
+                className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline">
+                {showAllMail ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                {showAllMail ? `Hide the earlier ${hidden} message(s)` : `Show ${hidden} earlier message(s)`}
+              </button>
+            )}
+          </>
         )}
         <p className="mt-3 text-xs text-muted-foreground">
           Every message to and from <b className="text-foreground">{WHL_CONTACT}</b> is logged against its lot — status requests, interim updates and report deliveries in one thread.
+          {thread.length > RECENT_MAILS && ` Showing the ${RECENT_MAILS} most recent of ${thread.length}.`}
         </p>
       </Panel>
     </div>
+  );
+}
+
+/**
+ * One message in the WHL thread. The body is clamped to a couple of lines so a long
+ * report mail can't push the rest of the thread off screen — "view full email" opens it
+ * in place. Short mails are shown whole and get no toggle.
+ */
+function MailRow({
+  m, orderId, expanded, onToggle, onEscalate,
+}: { m: LabEmail; orderId: string; expanded: boolean; onToggle: () => void; onEscalate: (orderId: string, emailId: string) => void }) {
+  const long = m.body.length > 160 || m.body.includes("\n");
+  return (
+    <li className="flex gap-3">
+      <div className={cn("mt-1.5 h-2 w-2 shrink-0 rounded-full", m.direction === "OUT" ? "bg-primary" : "bg-ok")} />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <Pill tone={m.direction === "OUT" ? "info" : "neutral"}>{m.direction === "OUT" ? "sent" : "received"}</Pill>
+          <StatusPill status={m.status} />
+          <span className="text-xs text-faint tnum">{m.at}</span>
+          {m.lotCode && <span className="text-xs text-muted-foreground">{m.lotCode} · <span className="font-mono">{m.mpn}</span>{m.workOrderNo ? ` · WO ${m.workOrderNo}` : ""}</span>}
+        </div>
+        <button onClick={onToggle} className="block w-full text-left text-sm font-medium hover:text-primary" title={expanded ? "Collapse" : "View full email"}>
+          {m.subject}
+        </button>
+        <p className={cn("whitespace-pre-wrap text-xs text-muted-foreground", !expanded && long && "line-clamp-2")}>{m.body}</p>
+        <div className="mt-1 flex flex-wrap items-center gap-3 text-[11px] text-faint">
+          {long && (
+            <button onClick={onToggle} className="inline-flex items-center gap-1 font-medium text-primary hover:underline">
+              {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+              {expanded ? "collapse" : "view full email"}
+            </button>
+          )}
+          <span>{m.by}</span>
+          {m.attachments?.length ? <span className="inline-flex items-center gap-1"><FileText className="h-3 w-3" /> {m.attachments.join(", ")}</span> : null}
+          {m.matchedBy && <span>matched by {m.matchedBy}</span>}
+          {m.direction === "OUT" && m.status === "AWAITING_RESPONSE" && (
+            <button className="underline" onClick={() => onEscalate(orderId, m.id)}>Mark escalated</button>
+          )}
+        </div>
+      </div>
+    </li>
   );
 }

@@ -1,4 +1,4 @@
-import type { NotifyParty } from "@/types";
+import type { NotifyParty, TestingStage } from "@/types";
 
 export type Tone = "neutral" | "active" | "warn" | "ok" | "bad" | "info";
 
@@ -119,6 +119,105 @@ export const WHL_CONCLUSIONS = ["ACCEPTABLE", "NOT_ACCEPTABLE", "SUSPECT_COUNTER
 export const TEST_PROCESS_STATUSES = ["PENDING", "IN_PROGRESS", "PASSED", "FAILED", "FAR", "NOT_CONDUCTED"] as const;
 export const WHL_CONTACT = "reports@whitehorselabs.example";
 export const WHL_SLA_BUSINESS_DAYS = 3; // an unanswered "Request Update" past this is flagged
+
+// ---- testing lifecycle -------------------------------------------------------------
+// The internal stage chain a lot walks between "we asked for testing" and "we have a
+// result". The per-test tracker answers *what* was tested; this answers *where the lot
+// physically is* — which is the question everyone actually asks while it's at the lab.
+//
+// Ordered, and only ever traversed forward: a later interim mail can't rewind a lot
+// that already has a report. Operators can correct a stage by hand (logged as manual).
+//
+// Note the tail: testing finishing and the report landing are separate events, and the
+// gap between them can be days — the lab can be done on the bench while the write-up is
+// still with its reviewer. So "Testing Completed" sits BEFORE report preparation, and the
+// chain ends on "Test Report Shared", which is the point we can actually act on.
+
+export const TESTING_STAGES: readonly TestingStage[] = [
+  "TEST_REQUESTED",
+  "SUPPLIER_DISPATCHING",
+  "COMPONENTS_RECEIVED",
+  "TESTING_STARTED",
+  "TESTING_IN_PROGRESS",
+  "TESTING_COMPLETED",
+  "REPORT_PREPARATION",
+  "REPORT_SHARED",
+] as const;
+
+/** The chain's end state — reaching it is what "done" means for a lot. */
+export const TESTING_TERMINAL_STAGE: TestingStage = TESTING_STAGES[TESTING_STAGES.length - 1];
+
+/** Who the chain is waiting on at each stage — drives the "waiting on" pill. */
+export type StageOwner = "1BUY" | "SUPPLIER" | "WHL";
+
+export interface TestingStageMeta {
+  label: string;
+  description: string;
+  owner: StageOwner;
+  /** what normally moves the lot into this stage (shown on stages not yet reached) */
+  trigger: string;
+}
+
+export const TESTING_STAGE_META: Record<TestingStage, TestingStageMeta> = {
+  TEST_REQUESTED: {
+    label: "Test Requested",
+    description: "Testing request has been initiated.",
+    owner: "1BUY",
+    trigger: "Work order raised with WHL for this lot.",
+  },
+  SUPPLIER_DISPATCHING: {
+    label: "Supplier Dispatching Components",
+    description: "Supplier is preparing and shipping the components to WHL.",
+    owner: "SUPPLIER",
+    trigger: "Supplier confirms dispatch — record it with courier / AWB.",
+  },
+  COMPONENTS_RECEIVED: {
+    label: "Components Received by WHL",
+    description: "WHL has confirmed receipt of the components.",
+    owner: "WHL",
+    trigger: "Receipt confirmation mail from WHL.",
+  },
+  TESTING_STARTED: {
+    label: "Testing Started",
+    description: "Laboratory testing has commenced.",
+    owner: "WHL",
+    trigger: "WHL mails to say the lot is on the bench.",
+  },
+  TESTING_IN_PROGRESS: {
+    label: "Testing In Progress",
+    description: "WHL is actively conducting the required tests and sharing progress updates.",
+    owner: "WHL",
+    trigger: "Interim progress mails from WHL — each one updates the test tracker.",
+  },
+  TESTING_COMPLETED: {
+    label: "Testing Completed",
+    description: "Testing process has been successfully completed.",
+    owner: "WHL",
+    trigger: "WHL confirms every process in the agreed test plan has been run.",
+  },
+  REPORT_PREPARATION: {
+    label: "Report Preparation",
+    description: "Testing is complete and the final report is being compiled.",
+    owner: "WHL",
+    trigger: "WHL confirms the report is being written / with its reviewer — this can lag the bench work by days.",
+  },
+  REPORT_SHARED: {
+    label: "Test Report Shared",
+    description: "WHL has shared the completed test report and results.",
+    owner: "WHL",
+    trigger: "Report received and parsed onto the lot.",
+  },
+};
+
+export const stageIdx = (stage?: TestingStage) => (stage ? TESTING_STAGES.indexOf(stage) : -1);
+export const stageMeta = (stage: TestingStage) => TESTING_STAGE_META[stage];
+export const stageLabel = (stage?: TestingStage) => (stage ? TESTING_STAGE_META[stage].label : "Not started");
+
+export const STAGE_OWNER_LABEL: Record<StageOwner, string> = {
+  "1BUY": "1Buy",
+  SUPPLIER: "Supplier",
+  WHL: "WHL",
+};
 
 // Confidentiality: WHL reports carry NDA language — storage/viewing stays internal + access-logged.
 export const WHL_CONFIDENTIALITY =

@@ -1,6 +1,6 @@
-import type { OrderBundle, JourneyStep, ClientPO, SupplierPO, Lot, LotTest, WhlReport } from "@/types";
+import type { OrderBundle, JourneyStep, ClientPO, SupplierPO, Lot, LotTest, WhlReport, TestingStage } from "@/types";
 import { toUSD } from "@/lib/fx";
-import { WHL_SLA_BUSINESS_DAYS } from "@/data/enums";
+import { WHL_SLA_BUSINESS_DAYS, TESTING_STAGES, TESTING_STAGE_META, TESTING_TERMINAL_STAGE, stageIdx } from "@/data/enums";
 
 export type OrdersMap = Record<string, OrderBundle>;
 
@@ -98,6 +98,67 @@ export function lotTestProgress(lot: Lot) {
 
 export const currentReport = (lot: Lot): WhlReport | undefined =>
   (lot.reports ?? []).find((r) => r.current) ?? (lot.reports ?? []).slice().sort((a, c) => c.revision - a.revision)[0];
+
+// ---- testing lifecycle -------------------------------------------------------------
+
+/**
+ * Stage inferred purely from what's on the lot. Used as a floor under the stored
+ * stage so a lot that already has a report can never *display* as "awaiting
+ * dispatch" — and so lots created before the chain existed still read correctly.
+ *
+ * Report preparation is deliberately not derivable: it's a state inside the lab that
+ * nothing on our side of the wire implies. It only ever comes from WHL telling us.
+ */
+function derivedStage(lot: Lot): TestingStage | undefined {
+  const p = lotTestProgress(lot);
+  // the report is the last thing to arrive, so having one settles the whole chain
+  if ((lot.reports ?? []).length > 0) return "REPORT_SHARED";
+  // every process conducted, nothing still running → the lab is done on the bench
+  if (p.total > 0 && p.open === 0) return "TESTING_COMPLETED";
+  if ((lot.tests ?? []).some((t) => t.status !== "PENDING")) return "TESTING_IN_PROGRESS";
+  if (lot.dispatch) return "SUPPLIER_DISPATCHING";
+  if (lot.workOrderNo) return "TEST_REQUESTED";
+  return undefined;
+}
+
+/** The stage to show for a lot: the furthest of what's stored and what's implied. */
+export function lotStage(lot: Lot): TestingStage | undefined {
+  const stored = stageIdx(lot.stage);
+  const derived = stageIdx(derivedStage(lot));
+  const i = Math.max(stored, derived);
+  return i < 0 ? undefined : TESTING_STAGES[i];
+}
+
+/** Everything the stage chain UI needs for one lot. */
+export function lotStageProgress(lot: Lot) {
+  const stage = lotStage(lot);
+  const idx = stageIdx(stage);
+  const total = TESTING_STAGES.length;
+  const history = lot.stageHistory ?? [];
+  const complete = stage === TESTING_TERMINAL_STAGE;
+  return {
+    stage,
+    idx,
+    total,
+    complete,
+    done: idx + 1,
+    pct: Math.round(((idx + 1) / total) * 100),
+    /** what the chain is waiting on next, or null once the report is in */
+    next: idx + 1 < total ? TESTING_STAGES[idx + 1] : null,
+    waitingOn: idx < 0 ? "1BUY" as const : complete ? null : TESTING_STAGE_META[TESTING_STAGES[Math.min(idx + 1, total - 1)]].owner,
+    /** last recorded move, for "x days at this stage" style copy */
+    lastEvent: history.length ? history[history.length - 1] : undefined,
+    /** stage → the event that recorded it (stages reached by a skip have none) */
+    eventFor: (s: TestingStage) => history.filter((e) => e.stage === s).slice(-1)[0],
+  };
+}
+
+/** Lots whose chain is parked on someone else — the "who owes us something" view. */
+export function stageWaiting(b: OrderBundle) {
+  return b.lots
+    .map((lot) => ({ lot, ...lotStageProgress(lot) }))
+    .filter((r) => !r.complete);
+}
 
 export const lotEmails = (b: OrderBundle, lotId: string) =>
   (b.labEmails ?? []).filter((m) => m.lotId === lotId);

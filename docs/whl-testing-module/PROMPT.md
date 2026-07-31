@@ -8,8 +8,8 @@ somewhere in that repo (e.g. `docs/whl-testing-module/CONTEXT.md`). Fill in the 
 
 Read `docs/whl-testing-module/CONTEXT.md` in full before writing any code. It is the specification for a
 **WHL (White Horse Laboratories) testing section** — a per-order screen that tracks every MPN's test
-requirements and results from PO upload, through testing at the lab, to report receipt and follow-through.
-Build that module in this codebase.
+requirements and results from PO upload, through the lot's journey at the lab, to report receipt and
+follow-through. Build that module in this codebase.
 
 ## 0. Host specifics
 
@@ -34,7 +34,9 @@ If any line above is blank, discover it from the codebase before starting and te
    only *adds* fields and reads them. If the host has no lot concept at all, stop and ask.
 4. **The §10 invariants in CONTEXT.md are requirements, not suggestions.** In particular: never leave a
    failed parse blank, never drop unroutable inbound mail, keep every report revision, treat F.A.R. and
-   Not-Conducted as unfinished, keep the buyer and supplier masked from each other, and log every change.
+   Not-Conducted as unfinished, keep the buyer and supplier masked from each other, log every change, keep
+   the lifecycle forward-only, and keep the lifecycle stage separate from the per-test status — they answer
+   different questions and must not be collapsed into one field.
 5. **Product copy is verbatim.** The email/notification templates in §8 and the on-screen sentences quoted
    in §9 are the deliverable, not placeholders. Do not paraphrase them.
 6. **Comment only what isn't obvious from the code** — the domain rules (masking, F.A.R., release trigger,
@@ -45,8 +47,8 @@ If any line above is blank, discover it from the codebase before starting and te
 Work in this sequence and keep the tree compiling at each step.
 
 1. **Types** — §3 verbatim (adapt only the enclosing order/lot aggregate to this repo's names). Extend the
-   existing lot type with `clientPoNo`, `tests`, `reports`, `lastUpdateRequestAt`, `notifications`; add
-   `mpnTests` and `labEmails` to the order aggregate.
+   existing lot type with `clientPoNo`, `tests`, `reports`, `lastUpdateRequestAt`, `notifications`,
+   `stage`, `stageHistory`, `dispatch`; add `mpnTests` and `labEmails` to the order aggregate.
 2. **Reference data + copy** — §4 constants, the §3 status→tone mapping wired into this repo's badge
    component (render `FAR` as “F.A.R.”), §8 templates as pure functions of a context object. Both the store
    action and the compose UI must build mails from the *same* template source.
@@ -58,10 +60,13 @@ Work in this sequence and keep the tree compiling at each step.
 5. **Derived state** — §5 as pure functions/selectors. `testingSummary(bundle, lotId?)` must scope every
    number except `unmatched`.
 6. **Actions** — §6, in the host's state layer, with the exact semantics, audit writes and guards. Optimistic
-   where an adapter is called; roll back or mark FAILED with a retry note on error.
-7. **Screen** — §9.1–9.6: the roll-up panel with lot scope selector + lot-wise results table + bulk bar,
-   the alert stack, the three sub-tabs, both action menus and the four modals.
-8. **Logistics hand-off** — §9.7: extend the host's logistics/shipment screen to accept
+   where an adapter is called; roll back or mark FAILED with a retry note on error. Route every automatic
+   lifecycle move through the single `moveStage` helper and read its warning about which stage value to
+   compare against — getting that wrong silently swallows history rows.
+7. **Screen** — §9.1–9.7: the roll-up panel with lot scope selector + lot-wise results table + bulk bar,
+   the alert stack, the three sub-tabs, the lifecycle stepper (§9.3a), both action menus, the five modals,
+   and the collapse/density rules (§9.7 — build them in from the start, they are not a polish pass).
+8. **Logistics hand-off** — §9.8: extend the host's logistics/shipment screen to accept
    `?order=&lot=` and `?order=&lots=a,b,c`, show the tested-lot panel, and auto-open the host's
    create-shipment modal pre-filled with merged, capped quantities.
 9. **Demo seed** — §13. Hardcode it in this repo's fixture layer, including the shipment headroom note
@@ -76,6 +81,13 @@ Work in this sequence and keep the tree compiling at each step.
   F.A.R. report is flagged; the "Not Available" lot offers Request Update; the reconciliation and SLA
   banners appear; the manual-match queue lists the unroutable mail; the lot selector scopes the tiles;
   the bulk bar's quick filters select; both logistics deep links pre-fill with non-zero quantities.
+  Verify **collapsed and expanded** states separately — a card that renders its body while collapsed
+  defeats the whole density rule, and you cannot see that from the collapsed screenshot alone.
+- Drive the lifecycle end to end rather than eyeballing it: from a fresh lot, record a dispatch and poll the
+  inbox repeatedly until the report lands, asserting that **all 8 stages are visited in order**, that none
+  is skipped, that nothing moves backwards, and that a completed lot is left untouched by further polls.
+  The stage-advance path is probabilistic, so **run it several times** — the two stage-ordering bugs called
+  out in §7.3 were each reproducible only across repeated runs.
 - Walk the §14 acceptance checklist and report any box you could not tick, with the reason.
 - Then summarise: what you built, where each piece lives, what you seeded, and anything you deliberately
   deviated from in CONTEXT.md because this codebase required it.
@@ -96,15 +108,17 @@ Use these only if you want the work split into sessions rather than one pass.
 > and lint are clean.
 
 **Phase 2 — the screen**
-> Continue from the data layer already built. Implement §9.1–9.6 of `CONTEXT.md`: the roll-up panel (lot
-> scope selector, six stat tiles, progress, alert stack, bulk bar, lot-wise results table), the three
-> sub-tabs (MPNs & tests · Lots/status/reports · WHL correspondence), the per-lot and bulk "Next actions"
-> menus, and the compose / notify / bulk-notify / match modals. Copy the quoted on-screen sentences verbatim.
+> Continue from the data layer already built. Implement §9.1–9.7 of `CONTEXT.md`: the roll-up panel (lot
+> scope selector, six stat tiles, progress, alert stack, bulk bar, lot-wise results table with the Progress
+> column), the three sub-tabs (MPNs & tests · Lots/status/reports · WHL correspondence), the per-lot
+> lifecycle stepper (§9.3a), the per-lot and bulk "Next actions" menus, the compose / notify / bulk-notify /
+> match / record-dispatch modals, and the collapse rules in §9.7. Copy the quoted on-screen sentences
+> verbatim.
 
 **Phase 3 — logistics hand-off + seed**
-> Implement §9.7 (logistics deep link `?order=&lot=` / `&lots=`, tested-lot panel, pre-filled shipment with
-> merged and capped quantities) and the §13 demo seed. Verify with a real render that both deep links
-> pre-fill non-zero quantities, then walk the §14 checklist.
+> Implement §9.8 (logistics deep link `?order=&lot=` / `&lots=`, tested-lot panel, pre-filled shipment with
+> merged and capped quantities) and the §13 demo seed — including the lifecycle seed rules. Verify with a
+> real render that both deep links pre-fill non-zero quantities, then walk the §14 checklist.
 
 **Audit an existing implementation**
 > Read `docs/whl-testing-module/CONTEXT.md` and audit our testing section against it. Report, as a table:

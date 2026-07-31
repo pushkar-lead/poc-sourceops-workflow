@@ -127,6 +127,58 @@ export function RecordDispatchModal({
 }
 
 /**
+ * Record the transfer finance released against WHL's testing invoice. This is what
+ * closes the Payment-to-WHL stage — the lab's own reminder mails are just noise until
+ * we can quote a reference back at them.
+ */
+export function MarkLabFeePaidModal({
+  orderId, lotId, onClose,
+}: { orderId: string; lotId: string; onClose: () => void }) {
+  const lot = useStore((s) => s.orders[orderId]?.lots.find((l) => l.id === lotId));
+  const markLabFeePaid = useStore((s) => s.markLabFeePaid);
+  const [paidRef, setPaidRef] = useState("");
+  const [paidAt, setPaidAt] = useState(new Date().toISOString().slice(0, 10));
+  const [note, setNote] = useState("");
+  if (!lot) return null;
+  const inv = lot.labPayment?.invoice;
+  const gross = inv ? inv.amount + (inv.taxAmount ?? 0) : 0;
+
+  const save = () => {
+    markLabFeePaid(orderId, lotId, { paidRef: paidRef.trim() || undefined, paidAt: paidAt || undefined, note: note.trim() || undefined });
+    onClose();
+  };
+
+  return (
+    <Dialog open onClose={onClose} title="Record WHL fee payment"
+      footer={<Footer onClose={onClose} onSave={save} saveLabel="Mark paid" />}>
+      <div className="space-y-3">
+        <div className="rounded-lg bg-muted p-2.5 text-xs text-muted-foreground">
+          <b className="text-foreground">{lot.lotCode}</b> · <span className="font-mono">{lot.orderLineMpn}</span>
+          {lot.workOrderNo ? <> · WO {lot.workOrderNo}</> : null} · {lot.lab ?? "WHL"}
+          {inv ? (
+            <p className="mt-1">
+              Invoice <b className="text-foreground">{inv.invoiceNo}</b> — {inv.currency} {inv.amount.toLocaleString()}
+              {inv.taxAmount ? ` + tax ${inv.taxAmount.toLocaleString()}` : ""} = <b className="text-foreground">{inv.currency} {gross.toLocaleString()}</b>
+              {inv.dueDate ? ` · due ${inv.dueDate}` : ""}
+            </p>
+          ) : <p className="mt-1 text-warn">No invoice on file yet — recording payment without one is unusual; confirm with finance first.</p>}
+          <p className="mt-1">Closes the <b className="text-foreground">Payment to WHL</b> stage on this lot&apos;s lifecycle.</p>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Labeled label="Transfer reference" hint="the UTR / wire ref finance sends back">
+            <Input value={paidRef} onChange={(e) => setPaidRef(e.target.value)} placeholder="UTR-…" />
+          </Labeled>
+          <Labeled label="Paid on"><Input type="date" value={paidAt} onChange={(e) => setPaidAt(e.target.value)} /></Labeled>
+        </div>
+        <Labeled label="Note" hint="optional — part payment, FX difference, anything the lab should be told">
+          <Textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
+        </Labeled>
+      </div>
+    </Dialog>
+  );
+}
+
+/**
  * Compose to WHL — pre-filled with the lot's MPN / lot code / PO / work order so the
  * operator never has to look up WHL's address or reference numbers. In-app send logs
  * the message against the lot; "mailto" is offered as the quick fallback.
@@ -228,6 +280,13 @@ export function NotifyLotResultModal({
       conclusion: rep?.conclusion, anyFar: rep?.anyFar, clientPoNo: lot?.clientPoNo,
       supplierPoNo: b?.supplierPoNo, escrowRef: b?.escrow?.invoice?.invoiceNo ?? b?.orderNo,
       releasable: b?.escrow?.poAmount, currency: b?.currency, lab: lot?.lab,
+      // the finance mail bills the lab's invoice, not the test report
+      invoiceNo: lot?.labPayment?.invoice?.invoiceNo,
+      invoiceAmount: lot?.labPayment?.invoice?.amount,
+      invoiceTax: lot?.labPayment?.invoice?.taxAmount,
+      invoiceCurrency: lot?.labPayment?.invoice?.currency,
+      invoiceDueDate: lot?.labPayment?.invoice?.dueDate,
+      invoiceFile: lot?.labPayment?.invoice?.fileName,
     };
   };
 
@@ -235,15 +294,18 @@ export function NotifyLotResultModal({
   const [subject, setSubject] = useState(() => notifyTemplate(party).subject(ctxFor()));
   const [body, setBody] = useState(() => notifyTemplate(party).body(ctxFor()));
   const [attach, setAttach] = useState(party !== "WHL");
+  const isFinance = party === "FINANCE";
   const [edited, setEdited] = useState(false);
 
   if (!b || !lot) return null;
   const tpl = notifyTemplate(party);
   const rep = (lot.reports ?? []).find((r) => r.current) ?? (lot.reports ?? [])[0];
+  const inv = lot.labPayment?.invoice;
+  const doc = isFinance ? inv?.fileName : rep?.fileName;   // what the attachment tick actually sends
   const reset = () => { const c = ctxFor(); setTo(tpl.to(c)); setSubject(tpl.subject(c)); setBody(tpl.body(c)); setEdited(false); };
   const save = () => {
     if (!to.trim() || !subject.trim() || !body.trim()) return;
-    notifyLotResult(orderId, lotId, { party, to: to.trim(), subject, body, attachReport: attach && !!rep });
+    notifyLotResult(orderId, lotId, { party, to: to.trim(), subject, body, attachReport: attach && !!doc });
     onClose();
   };
 
@@ -253,7 +315,11 @@ export function NotifyLotResultModal({
       <div className="space-y-3">
         <div className="rounded-lg bg-muted p-2.5 text-xs text-muted-foreground">
           <b className="text-foreground">{lot.lotCode}</b> · <span className="font-mono">{lot.orderLineMpn}</span> · qty {lot.qty}
-          {rep ? <> · report <b className="text-foreground">{rep.reportNo}</b> — {rep.conclusion.replace(/_/g, " ").toLowerCase()}{rep.anyFar ? " (F.A.R. flagged)" : ""}</> : " · no report yet"}
+          {isFinance
+            ? (inv
+                ? <> · invoice <b className="text-foreground">{inv.invoiceNo}</b> — {inv.currency} {(inv.amount + (inv.taxAmount ?? 0)).toLocaleString()}{inv.dueDate ? ` · due ${inv.dueDate}` : ""}</>
+                : <span className="text-warn"> · no WHL invoice received yet</span>)
+            : (rep ? <> · report <b className="text-foreground">{rep.reportNo}</b> — {rep.conclusion.replace(/_/g, " ").toLowerCase()}{rep.anyFar ? " (F.A.R. flagged)" : ""}</> : " · no report yet")}
         </div>
         {tpl.masking && <p className="rounded-lg border border-[color-mix(in_srgb,var(--warn)_40%,transparent)] bg-warn-bg px-2.5 py-2 text-xs text-warn">{tpl.masking}</p>}
         <Labeled label="To" hint="mock address in the POC — edit freely"><Input value={to} onChange={(e) => { setTo(e.target.value); setEdited(true); }} /></Labeled>
@@ -262,10 +328,14 @@ export function NotifyLotResultModal({
           <Textarea className="min-h-[220px] font-mono text-xs" value={body} onChange={(e) => { setBody(e.target.value); setEdited(true); }} />
         </Labeled>
         <label className="flex items-start gap-2 text-sm">
-          <input type="checkbox" className="mt-0.5" checked={attach} disabled={!rep} onChange={(e) => setAttach(e.target.checked)} />
+          <input type="checkbox" className="mt-0.5" checked={attach} disabled={!doc} onChange={(e) => setAttach(e.target.checked)} />
           <span>
-            Attach the test report {rep ? <span className="font-mono text-xs">{rep.fileName}</span> : <span className="text-faint">(none received yet)</span>}
-            <span className="block text-[11px] text-muted-foreground">WHL reports are issued under NDA — attaching one records the disclosure on the lot&apos;s notification log.</span>
+            {isFinance ? "Attach the WHL invoice" : "Attach the test report"} {doc ? <span className="font-mono text-xs">{doc}</span> : <span className="text-faint">(none received yet)</span>}
+            <span className="block text-[11px] text-muted-foreground">
+              {isFinance
+                ? "Finance needs the invoice itself to release the transfer; the send is logged on the lot's notification log."
+                : "WHL reports are issued under NDA — attaching one records the disclosure on the lot's notification log."}
+            </span>
           </span>
         </label>
         {edited && <button type="button" onClick={reset} className="text-xs font-medium text-primary hover:underline">Reset to the template</button>}
@@ -291,6 +361,9 @@ export function BulkNotifyModal({
   const repOf = (l: (typeof lots)[number]) => (l.reports ?? []).find((r) => r.current) ?? (l.reports ?? [])[0];
   const withReport = lots.filter((l) => !!repOf(l));
   const noReport = lots.filter((l) => !repOf(l));
+  // finance mails carry invoices, not reports — so "what's attached" and "what's missing" differ
+  const withInvoice = lots.filter((l) => !!l.labPayment?.invoice);
+  const noInvoice = lots.filter((l) => !l.labPayment?.invoice);
 
   // groups = one outbound mail each
   const groups = party === "BUYER"
@@ -303,8 +376,11 @@ export function BulkNotifyModal({
     escrowRef: b?.escrow?.invoice?.invoiceNo ?? b?.orderNo, currency: b?.currency, releasable: b?.escrow?.poAmount,
     lots: grp.lots.map((l) => {
       const r = repOf(l);
+      const iv = l.labPayment?.invoice;
       return { mpn: l.orderLineMpn, lotCode: l.lotCode, qty: l.qty, sampleQty: l.sampleQty, dateCode: l.dateCode,
-        reportNo: r?.reportNo, reportDate: r?.reportDate, conclusion: r?.conclusion, anyFar: r?.anyFar, lab: l.lab, workOrderNo: l.workOrderNo };
+        reportNo: r?.reportNo, reportDate: r?.reportDate, conclusion: r?.conclusion, anyFar: r?.anyFar, lab: l.lab, workOrderNo: l.workOrderNo,
+        invoiceNo: iv?.invoiceNo, invoiceAmount: iv?.amount, invoiceTax: iv?.taxAmount,
+        invoiceCurrency: iv?.currency, invoiceDueDate: iv?.dueDate };
     }),
   });
 
@@ -314,6 +390,7 @@ export function BulkNotifyModal({
   const [subject, setSubject] = useState<Record<string, string>>({});
   const [body, setBody] = useState<Record<string, string>>({});
   const [attach, setAttach] = useState(party !== "WHL");
+  const isFinance = party === "FINANCE";
 
   if (!b || lots.length === 0) return null;
   const grp = groups[Math.min(active, groups.length - 1)];
@@ -345,9 +422,11 @@ export function BulkNotifyModal({
           {party === "BUYER" && groups.length > 1 && <> Split into <b className="text-foreground">{groups.length} mails — one per client PO</b>, so no client sees another&apos;s lots.</>}
         </div>
         {tpl.masking && <p className="rounded-lg border border-[color-mix(in_srgb,var(--warn)_40%,transparent)] bg-warn-bg px-2.5 py-2 text-xs text-warn">{tpl.masking}</p>}
-        {noReport.length > 0 && (
+        {(isFinance ? noInvoice : noReport).length > 0 && (
           <p className="rounded-lg border border-[color-mix(in_srgb,var(--warn)_40%,transparent)] bg-warn-bg px-2.5 py-2 text-xs text-warn">
-            {noReport.length} selected lot(s) have no report yet ({noReport.map((l) => l.lotCode).join(", ")}) — they are listed as “result pending”. {withReport.length} of {lots.length} carry a report.
+            {isFinance
+              ? <>{noInvoice.length} selected lot(s) have no WHL invoice yet ({noInvoice.map((l) => l.lotCode).join(", ")}) — they are excluded from this payment run. {withInvoice.length} of {lots.length} carry an invoice.</>
+              : <>{noReport.length} selected lot(s) have no report yet ({noReport.map((l) => l.lotCode).join(", ")}) — they are listed as “result pending”. {withReport.length} of {lots.length} carry a report.</>}
           </p>
         )}
 
@@ -392,10 +471,18 @@ export function BulkNotifyModal({
           <Textarea className="min-h-[240px] font-mono text-xs" value={curBody} onChange={(e) => setBody((p) => ({ ...p, [grp.key]: e.target.value }))} />
         </Labeled>
         <label className="flex items-start gap-2 text-sm">
-          <input type="checkbox" className="mt-0.5" checked={attach} disabled={withReport.length === 0} onChange={(e) => setAttach(e.target.checked)} />
+          <input type="checkbox" className="mt-0.5" checked={attach}
+            disabled={(isFinance ? withInvoice : withReport).length === 0}
+            onChange={(e) => setAttach(e.target.checked)} />
           <span>
-            Attach all available reports ({withReport.length} PDF{withReport.length === 1 ? "" : "s"})
-            <span className="block text-[11px] text-muted-foreground">Each disclosure is logged on every lot the digest covered.</span>
+            {isFinance
+              ? <>Attach all available invoices ({withInvoice.length} PDF{withInvoice.length === 1 ? "" : "s"})</>
+              : <>Attach all available reports ({withReport.length} PDF{withReport.length === 1 ? "" : "s"})</>}
+            <span className="block text-[11px] text-muted-foreground">
+              {isFinance
+                ? "Finance needs each invoice to release the transfers; the send is logged on every lot the run covered."
+                : "Each disclosure is logged on every lot the digest covered."}
+            </span>
           </span>
         </label>
       </div>

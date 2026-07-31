@@ -1,4 +1,4 @@
-import type { NotifyParty, TestingStage } from "@/types";
+import type { NotifyParty, TestingStage, LabPaymentStatus } from "@/types";
 
 export type Tone = "neutral" | "active" | "warn" | "ok" | "bad" | "info";
 
@@ -139,6 +139,7 @@ export const WHL_SLA_BUSINESS_DAYS = 3; // an unanswered "Request Update" past t
 
 export const TESTING_STAGES: readonly TestingStage[] = [
   "TEST_REQUESTED",
+  "WHL_PAYMENT",
   "SUPPLIER_DISPATCHING",
   "COMPONENTS_RECEIVED",
   "TESTING_STARTED",
@@ -168,6 +169,12 @@ export const TESTING_STAGE_META: Record<TestingStage, TestingStageMeta> = {
     description: "Testing request has been initiated.",
     owner: "1BUY",
     trigger: "Work order raised with WHL for this lot.",
+  },
+  WHL_PAYMENT: {
+    label: "Payment to WHL",
+    description: "WHL's testing invoice has been received and settled.",
+    owner: "1BUY",
+    trigger: "Invoice received from WHL, passed to finance, and confirmed paid.",
   },
   SUPPLIER_DISPATCHING: {
     label: "Supplier Dispatching Components",
@@ -216,6 +223,30 @@ export const TESTING_STAGE_META: Record<TestingStage, TestingStageMeta> = {
 export const stageIdx = (stage?: TestingStage) => (stage ? TESTING_STAGES.indexOf(stage) : -1);
 export const stageMeta = (stage: TestingStage) => TESTING_STAGE_META[stage];
 export const stageLabel = (stage?: TestingStage) => (stage ? TESTING_STAGE_META[stage].label : "Not started");
+
+// ---- WHL's own invoice for the testing service (separate document from the report) ----
+export const LAB_PAYMENT_LABEL: Record<LabPaymentStatus, string> = {
+  NOT_REQUESTED: "Invoice not requested",
+  REQUESTED: "Invoice requested",
+  INVOICE_RECEIVED: "Invoice received — unpaid",
+  SENT_TO_FINANCE: "With finance for payment",
+  PAID: "Paid",
+};
+
+export const LAB_PAYMENT_TONE: Record<LabPaymentStatus, Tone> = {
+  NOT_REQUESTED: "neutral",
+  REQUESTED: "warn",
+  INVOICE_RECEIVED: "warn",
+  SENT_TO_FINANCE: "active",
+  PAID: "ok",
+};
+
+/** Anything short of PAID means the lab fee is still outstanding. */
+export const labFeeOutstanding = (s?: LabPaymentStatus) => s !== "PAID";
+
+export const FINANCE_CONTACT = "finance@sharpbuy.example";
+export const WHL_TEST_FEE_PER_PROCESS = 145;   // USD per process — drives the mock invoice
+export const WHL_INVOICE_TAX_PCT = 0.06;       // lab-site service tax on the mock invoice
 
 export const STAGE_OWNER_LABEL: Record<StageOwner, string> = {
   "1BUY": "1Buy",
@@ -269,6 +300,11 @@ export const WHL_EMAIL_TEMPLATES: WhlMailTemplate[] = [
     id: "STATUS_REQUEST", label: "Status request", hint: "Where is this lot? (also used by “Request Update”)",
     subject: (c) => `Status request — ${tag(c)}`,
     body: (c) => `${head(c)}Could you share the current status of the above lot — which processes are complete, which are in progress, and the expected date for the report?\n\nIf the report is already issued, please attach the latest revision.\n\n${sign(c)}`,
+  },
+  {
+    id: "INVOICE_REQUEST", label: "Invoice request", hint: "Ask WHL for the testing invoice so payment can be raised",
+    subject: (c) => `Invoice request — ${tag(c)}`,
+    body: (c) => `${head(c)}Could you issue your invoice for the testing booked against the above work order?\n\nSo our finance team can raise the payment without a further exchange, please include:\n1. the invoice number and date,\n2. the processes billed and the amount, with any taxes shown separately,\n3. your bank details and the payment due date, and\n4. this work order and lot code as the payment reference.\n\nWe will confirm once the transfer is initiated.\n\n${sign(c)}`,
   },
   {
     id: "REPORT_REQUEST", label: "Report / latest revision", hint: "Ask for the PDF or the newest revision",
@@ -336,6 +372,13 @@ export interface NotifyCtx {
   releasable?: number;      // A1 still releasable, for the escrow mail
   currency?: string;
   lab?: string;
+  // WHL's testing invoice — only the finance mail uses these
+  invoiceNo?: string;
+  invoiceAmount?: number;
+  invoiceTax?: number;
+  invoiceCurrency?: string;
+  invoiceDueDate?: string;
+  invoiceFile?: string;
 }
 
 export interface NotifyTemplate {
@@ -403,6 +446,13 @@ export const NOTIFY_TEMPLATES: NotifyTemplate[] = [
       c.anyFar ? "One process is flagged F.A.R. — we will revert separately on the further analysis.\n\n" : ""
     }Please retain the samples until we confirm disposition.\n\nThanks,\nSourcing Ops\n${c.entity}`,
   },
+  {
+    party: "FINANCE", label: "Send to finance — initiate payment", hint: "Forward WHL's invoice so finance can pay the testing fee",
+    to: () => FINANCE_CONTACT,
+    masking: "Internal mail. The client's identity and sell prices are not needed to pay a lab fee — leave them out.",
+    subject: (c) => `Payment request — WHL invoice ${c.invoiceNo ?? "(awaited)"} — ${c.mpn} / Lot ${c.lotCode}`,
+    body: (c) => `Hi Finance,\n\nPlease initiate payment of the independent testing fee below. The invoice is attached.\n\n${lotRef(c)}\n· Laboratory: ${c.lab ?? "White Horse Laboratories"}\n· Invoice: ${c.invoiceNo ?? "awaited"}${c.invoiceDueDate ? ` · due ${c.invoiceDueDate}` : ""}\n· Amount: ${c.invoiceCurrency ?? c.currency ?? "USD"} ${(c.invoiceAmount ?? 0).toLocaleString()}${c.invoiceTax ? ` + tax ${c.invoiceCurrency ?? "USD"} ${c.invoiceTax.toLocaleString()}` : ""}\n\nPlease quote work order ${c.workOrderNo ?? "—"} and lot ${c.lotCode} as the payment reference so the lab can reconcile it, and send us the transfer reference once released.\n\nThis is a testing cost against ${c.supplierPoNo ?? "the supplier PO"} — book it to the order, not to the supplier's material payment.\n\nThanks,\nSourcing Ops\n${c.entity}`,
+  },
 ];
 
 export const notifyTemplate = (party: NotifyParty) =>
@@ -423,6 +473,12 @@ export interface NotifyDigestLot {
   anyFar?: boolean;
   lab?: string;
   workOrderNo?: string;
+  // only the finance digest (a payment run over several invoices) uses these
+  invoiceNo?: string;
+  invoiceAmount?: number;
+  invoiceTax?: number;
+  invoiceCurrency?: string;
+  invoiceDueDate?: string;
 }
 
 export interface NotifyDigestCtx {
@@ -489,6 +545,26 @@ export function notifyDigest(party: NotifyParty, c: NotifyDigestCtx): { subject:
           g.ok.length + g.far.length ? `The release trigger (independent lab PASS) is satisfied for ${codes([...g.ok, ...g.far])}. Please treat the attached report(s) as supporting evidence for the tranche release${c.releasable ? ` of up to ${c.currency ?? ""} ${c.releasable}` : ""}.\n\n` : ""
         }${g.bad.length ? `The trigger is NOT satisfied for ${codes(g.bad)} — please hold those funds; a refund instruction may follow once the return is agreed with the seller.\n\n` : ""}${sign}`,
       };
+    case "FINANCE": {
+      // a payment run: one mail, several lab invoices, one total to release
+      const billed = c.lots.filter((l) => l.invoiceNo);
+      const cur = billed[0]?.invoiceCurrency ?? c.currency ?? "USD";
+      const net = billed.reduce((s, l) => s + (l.invoiceAmount ?? 0), 0);
+      const tax = billed.reduce((s, l) => s + (l.invoiceTax ?? 0), 0);
+      const lines = billed.map((l, i) =>
+        `${i + 1}. ${l.mpn} · Lot ${l.lotCode} · WO ${l.workOrderNo ?? "—"} · invoice ${l.invoiceNo}`
+        + `${l.invoiceDueDate ? ` (due ${l.invoiceDueDate})` : ""} — ${l.invoiceCurrency ?? cur} ${(l.invoiceAmount ?? 0).toLocaleString()}`
+        + `${l.invoiceTax ? ` + tax ${l.invoiceTax.toLocaleString()}` : ""}`).join("\n");
+      const missing = c.lots.filter((l) => !l.invoiceNo);
+      return {
+        subject: `Payment request — ${billed.length} WHL invoice(s) — ${c.orderNo}`,
+        body: `Hi Finance,\n\nPlease initiate payment of the independent testing fees below. The invoices are attached.\n\n${lines}\n\n`
+          + `Total: ${cur} ${net.toLocaleString()}${tax ? ` + tax ${cur} ${tax.toLocaleString()} = ${cur} ${(net + tax).toLocaleString()}` : ""}\n\n`
+          + `Please quote each work order and lot code as the payment reference so the lab can reconcile them, and send us the transfer references once released.\n\n`
+          + (missing.length ? `No invoice has been received yet for ${codes(missing)} — those are excluded from this run and will follow separately.\n\n` : "")
+          + `These are testing costs against ${c.supplierPoNo ?? "the supplier PO"} — book them to the order, not to the supplier's material payment.\n\n${sign}`,
+      };
+    }
     case "WHL":
     default:
       return {

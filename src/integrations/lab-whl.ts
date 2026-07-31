@@ -1,9 +1,18 @@
 import { mockCall, ref, pickWeighted } from "@/integrations/mock-client";
-import { WHL_PROCESSES, WHL_CONTACT, WHL_CONFIDENTIALITY, stageIdx } from "@/data/enums";
+import {
+  WHL_PROCESSES, WHL_CONTACT, WHL_CONFIDENTIALITY, stageIdx,
+  WHL_TEST_FEE_PER_PROCESS, WHL_INVOICE_TAX_PCT,
+} from "@/data/enums";
 import type { TestStatus, WhlConclusion, WhlProcessResult, TestProcessStatus, TestingStage } from "@/types";
 
 const SYS = "whl";
 const LABEL = "WHL Lab";
+
+const addDaysIso = (iso: string, n: number) => {
+  const d = new Date(iso);
+  d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0, 10);
+};
 
 export interface WhlSubmitReq { clientRef: string; mpn: string; dateCode: string; lotCode: string; lotQty: number; sampleQty: number; testPlan: string; labSite: string; }
 export interface WhlSubmitRes { workOrderNo: string; status: "RECEIVED"; labSite: string; estimatedTatDays: number; }
@@ -117,7 +126,7 @@ export function whlSendMail(req: WhlSendMailReq) {
 
 // ---- inbound mail (status updates, delay notices, revised reports) ----
 
-export type WhlInboundKind = "STATUS_UPDATE" | "REPORT" | "DELAY" | "AMBIGUOUS" | "RECEIPT";
+export type WhlInboundKind = "STATUS_UPDATE" | "REPORT" | "DELAY" | "AMBIGUOUS" | "RECEIPT" | "INVOICE";
 export interface WhlInboundMail {
   messageId: string;
   kind: WhlInboundKind;
@@ -134,11 +143,31 @@ export interface WhlInboundMail {
   // per-test status updates carried by the mail
   testUpdates?: { name: string; status: TestProcessStatus; note?: string }[];
   attachments?: string[];
+  /** set on INVOICE mails — the lab's own bill for the testing service */
+  invoice?: WhlInvoiceLine;
+}
+
+/** WHL's invoice as it arrives on the mail, before we store it against the lot. */
+export interface WhlInvoiceLine {
+  invoiceNo: string;
+  amount: number;
+  taxAmount: number;
+  currency: string;
+  dueDate: string;
+  fileName: string;
+  processCount: number;
 }
 
 export interface WhlPollInboxReq {
-  /** `stage` lets the mock answer with the mail that plausibly comes next for that lot. */
-  workOrders: { workOrderNo: string; lotCode: string; mpn: string; testNames: string[]; stage?: TestingStage }[];
+  /**
+   * `stage` lets the mock answer with the mail that plausibly comes next for that lot.
+   * `hasInvoice` / `feePaid` keep it from re-issuing an invoice it has already sent, and
+   * let it chase an unpaid one.
+   */
+  workOrders: {
+    workOrderNo: string; lotCode: string; mpn: string; testNames: string[];
+    stage?: TestingStage; hasInvoice?: boolean; feePaid?: boolean;
+  }[];
 }
 
 /**
@@ -185,6 +214,37 @@ function nextStageMail(wo: WhlPollInboxReq["workOrders"][number], now: string): 
   const ref0 = `WO ${wo.workOrderNo} / Lot ${wo.lotCode}`;
   const picks = wo.testNames.length ? wo.testNames.slice(0, 2) : ["Electrical Test"];
   const at = stageIdx(wo.stage ?? undefined);
+
+  // The lab bills on booking, so its invoice is the first thing back after the work
+  // order — before the samples have even shipped. Issued once; we own it after that.
+  if (!wo.hasInvoice) {
+    const processCount = Math.max(1, wo.testNames.length || 5);
+    const amount = processCount * WHL_TEST_FEE_PER_PROCESS;
+    const taxAmount = Math.round(amount * WHL_INVOICE_TAX_PCT);
+    const invoiceNo = `WHL-INV-${wo.workOrderNo}`;
+    return {
+      ...base, kind: "INVOICE",
+      subject: `Invoice ${invoiceNo} — testing services — ${ref0}`,
+      body: `Please find attached our invoice ${invoiceNo} for the testing booked against work order ${wo.workOrderNo} (${wo.mpn}, Lot ${wo.lotCode}).\n\n${processCount} process(es) at USD ${WHL_TEST_FEE_PER_PROCESS} each — USD ${amount.toLocaleString()} plus service tax USD ${taxAmount.toLocaleString()}. Payment is due within 15 days; please quote the work order and lot code as the reference so we can reconcile it.`,
+      attachments: [`WHL-INV-${wo.workOrderNo}.pdf`],
+      invoice: {
+        invoiceNo, amount, taxAmount, currency: "USD",
+        dueDate: addDaysIso(now.slice(0, 10), 15),
+        fileName: `WHL-INV-${wo.workOrderNo}.pdf`,
+        processCount,
+      },
+    };
+  }
+
+  // Invoice out and unpaid — the lab chases the fee occasionally. Testing still proceeds
+  // (they work on account), so this never blocks the physical chain.
+  if (!wo.feePaid && Math.random() < 0.2) {
+    return {
+      ...base, kind: "INVOICE",
+      subject: `Payment reminder — invoice WHL-INV-${wo.workOrderNo} — ${ref0}`,
+      body: `Our invoice WHL-INV-${wo.workOrderNo} for the testing on ${wo.mpn} (Lot ${wo.lotCode}) is still showing as outstanding on our ledger. Could you confirm when the transfer was or will be released, and share the reference so we can reconcile it?`,
+    };
+  }
 
   // Nothing has been dispatched yet — the lab chases us, it can't confirm a receipt.
   if (at < stageIdx("SUPPLIER_DISPATCHING")) {

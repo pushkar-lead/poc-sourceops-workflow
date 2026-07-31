@@ -1,4 +1,8 @@
-import type { OrderBundle, JourneyStep, ClientPO, SupplierPO, Lot, LotTest, WhlReport, TestingStage, EscrowFeeBreakdown, EscrowOrderStatus } from "@/types";
+import type {
+  OrderBundle, JourneyStep, ClientPO, SupplierPO, Lot, LotTest, WhlReport, TestingStage,
+  EscrowFeeBreakdown, EscrowOrderStatus,
+  LabPayment, LabPaymentStatus,
+} from "@/types";
 import { toUSD } from "@/lib/fx";
 import { WHL_SLA_BUSINESS_DAYS, TESTING_STAGES, TESTING_STAGE_META, TESTING_TERMINAL_STAGE, stageIdx, ESCROW_STATUS_ORDER } from "@/data/enums";
 
@@ -165,8 +169,46 @@ function derivedStage(lot: Lot): TestingStage | undefined {
   if (p.total > 0 && p.open === 0) return "TESTING_COMPLETED";
   if ((lot.tests ?? []).some((t) => t.status !== "PENDING")) return "TESTING_IN_PROGRESS";
   if (lot.dispatch) return "SUPPLIER_DISPATCHING";
+  if (lot.labPayment?.status === "PAID") return "WHL_PAYMENT";
   if (lot.workOrderNo) return "TEST_REQUESTED";
   return undefined;
+}
+
+// ---- WHL's testing fee ----
+// The fee is a parallel track: the lab works on account, so testing proceeds whether or
+// not we've paid. That means the chain can legitimately run past the payment stage with
+// the fee still outstanding — which is why the stepper reads the record below for that
+// one node instead of trusting its index, and why this is surfaced as its own alert.
+
+export const labPaymentOf = (lot: Lot): LabPayment => lot.labPayment ?? { status: "NOT_REQUESTED" };
+
+export const labFeeUnpaid = (lot: Lot) => labPaymentOf(lot).status !== "PAID";
+
+/** Lots whose lab invoice is still unpaid, worst first (received > requested > not asked). */
+export function outstandingLabFees(b: OrderBundle) {
+  const rank: Record<LabPaymentStatus, number> = {
+    SENT_TO_FINANCE: 0, INVOICE_RECEIVED: 1, REQUESTED: 2, NOT_REQUESTED: 3, PAID: 4,
+  };
+  return b.lots
+    .filter((l) => !!l.workOrderNo && labFeeUnpaid(l))
+    .map((lot) => {
+      const p = labPaymentOf(lot);
+      return {
+        lot,
+        status: p.status,
+        invoiceNo: p.invoice?.invoiceNo,
+        gross: (p.invoice?.amount ?? 0) + (p.invoice?.taxAmount ?? 0),
+        currency: p.invoice?.currency ?? "USD",
+        dueDate: p.invoice?.dueDate,
+      };
+    })
+    .sort((a, c) => rank[a.status] - rank[c.status]);
+}
+
+/** Total lab fee still owed on an order, by currency (mock only ever issues one). */
+export function labFeeOutstandingTotal(b: OrderBundle) {
+  const rows = outstandingLabFees(b).filter((r) => !!r.invoiceNo);
+  return { count: rows.length, gross: rows.reduce((s, r) => s + r.gross, 0), currency: rows[0]?.currency ?? "USD" };
 }
 
 /** The stage to show for a lot: the furthest of what's stored and what's implied. */
@@ -279,6 +321,9 @@ export function testingSummary(b: OrderBundle, lotId?: string) {
     unmatched: unmatchedEmails(b).length,
     gaps: testAutofillGaps(b).filter((g) => !lotId || mpns.has(g.mpn)).length,
     overdue: overdueUpdateRequests(b).filter((o) => !lotId || o.lot.id === lotId).length,
+    // lab fees still owed, scoped like everything else except `unmatched`
+    feesUnpaid: lots.filter((l) => !!l.workOrderNo && labFeeUnpaid(l)).length,
+    feesToPay: lots.filter((l) => labPaymentOf(l).status === "INVOICE_RECEIVED").length,
   };
 }
 

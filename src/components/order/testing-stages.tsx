@@ -2,12 +2,15 @@
 
 import {
   ClipboardList, Truck, PackageCheck, FlaskConical, Activity, BadgeCheck, FileClock, FileText,
-  Check, CircleDot, RefreshCw, Hourglass,
+  Check, CircleDot, RefreshCw, Hourglass, Receipt, Mail, Download, Landmark,
 } from "lucide-react";
 import type { Lot, TestingStage } from "@/types";
-import { TESTING_STAGES, TESTING_STAGE_META, STAGE_OWNER_LABEL, stageIdx } from "@/data/enums";
-import { lotStageProgress } from "@/store/selectors";
-import { Button } from "@/components/ui/primitives";
+import {
+  TESTING_STAGES, TESTING_STAGE_META, STAGE_OWNER_LABEL, stageIdx,
+  LAB_PAYMENT_LABEL, LAB_PAYMENT_TONE,
+} from "@/data/enums";
+import { lotStageProgress, labPaymentOf, labFeeUnpaid } from "@/store/selectors";
+import { Button, Pill } from "@/components/ui/primitives";
 import { useStore } from "@/store/store";
 import { cn } from "@/lib/utils";
 
@@ -17,6 +20,7 @@ import { cn } from "@/lib/utils";
 
 const STAGE_ICON: Record<TestingStage, React.ComponentType<{ className?: string }>> = {
   TEST_REQUESTED: ClipboardList,
+  WHL_PAYMENT: Receipt,
   SUPPLIER_DISPATCHING: Truck,
   COMPONENTS_RECEIVED: PackageCheck,
   TESTING_STARTED: FlaskConical,
@@ -59,8 +63,13 @@ export function TestingStageBar({ lot, className }: { lot: Lot; className?: stri
  * than showing them done without a timestamp.
  */
 export function TestingStageChain({
-  orderId, lot, canEdit, onRecordDispatch,
-}: { orderId: string; lot: Lot; canEdit: boolean; onRecordDispatch: () => void }) {
+  orderId, lot, canEdit, onRecordDispatch, onSendToFinance, onMarkPaid,
+}: {
+  orderId: string; lot: Lot; canEdit: boolean;
+  onRecordDispatch: () => void;
+  onSendToFinance: () => void;
+  onMarkPaid: () => void;
+}) {
   const syncWhlInbox = useStore((s) => s.syncWhlInbox);
   const setLotStage = useStore((s) => s.setLotStage);
   const { stage, idx, total, done, complete, waitingOn, eventFor } = lotStageProgress(lot);
@@ -95,16 +104,22 @@ export function TestingStageChain({
         {TESTING_STAGES.map((s, i) => {
           const meta = TESTING_STAGE_META[s];
           const Icon = STAGE_ICON[s];
-          const isDone = i < idx || (complete && i === idx);
-          const isCurrent = i === idx && !complete;
+          // The lab works on account, so testing can run past the payment stage with the
+          // fee still owed. Index alone would then paint this node "done" — a lie. Read
+          // the payment record instead: it's the one node whose truth isn't positional.
+          const unpaid = s === "WHL_PAYMENT" && labFeeUnpaid(lot);
+          const isDone = !unpaid && (i < idx || (complete && i === idx));
+          const isCurrent = !unpaid && i === idx && !complete;
           const ev = eventFor(s);
-          const node = isDone ? "border-primary bg-primary text-primary-foreground"
+          const node = unpaid ? "border-warn bg-warn-bg text-warn"
+            : isDone ? "border-primary bg-primary text-primary-foreground"
             : isCurrent ? "border-primary text-primary ring-2 ring-accent-soft"
             : "border-border text-faint";
           // the tooltip carries what the vertical list used to spell out
           const tip = [
             meta.description,
-            ev ? `${ev.at} · ${ev.by}${ev.note ? ` — ${ev.note}` : ""}` : !isDone && !isCurrent ? `↳ ${meta.trigger}` : undefined,
+            unpaid ? `⚠ ${LAB_PAYMENT_LABEL[labPaymentOf(lot).status]} — the lab is testing on account; settle the fee.` : undefined,
+            ev ? `${ev.at} · ${ev.by}${ev.note ? ` — ${ev.note}` : ""}` : !isDone && !isCurrent && !unpaid ? `↳ ${meta.trigger}` : undefined,
           ].filter(Boolean).join("\n");
 
           return (
@@ -112,7 +127,7 @@ export function TestingStageChain({
               <div className="flex w-full items-center">
                 <span className={cn("h-0.5 flex-1", i === 0 ? "opacity-0" : i <= idx ? "bg-primary" : "bg-border")} />
                 <span className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-full border-2 text-[11px] font-semibold", node)}>
-                  {isDone ? <Check className="h-3.5 w-3.5" /> : isCurrent ? <Icon className="h-3.5 w-3.5" /> : i + 1}
+                  {isDone ? <Check className="h-3.5 w-3.5" /> : (isCurrent || unpaid) ? <Icon className="h-3.5 w-3.5" /> : i + 1}
                 </span>
                 <span className={cn("h-0.5 flex-1", i === total - 1 ? "opacity-0" : i < idx ? "bg-primary" : "bg-border")} />
               </div>
@@ -168,6 +183,10 @@ export function TestingStageChain({
         </div>
       </div>
 
+      {/* the lab's own bill — a different document from the report, on its own track */}
+      <LabFeePanel orderId={orderId} lot={lot} canEdit={canEdit}
+        onSendToFinance={onSendToFinance} onMarkPaid={onMarkPaid} />
+
       {lot.dispatch && (
         <div className="mt-3 rounded-lg border bg-card-2 p-3 text-xs">
           <div className="mb-1 flex flex-wrap items-center gap-2">
@@ -185,6 +204,91 @@ export function TestingStageChain({
           {lot.dispatch.note && <p className="mt-1 text-faint">{lot.dispatch.note}</p>}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * WHL's invoice for the testing service and its settlement. Deliberately its own block:
+ * the invoice is a different document from the test report, arrives on its own schedule
+ * (the lab bills on booking, reports weeks later), and is paid by a different team.
+ */
+export function LabFeePanel({
+  orderId, lot, canEdit, onSendToFinance, onMarkPaid,
+}: {
+  orderId: string; lot: Lot; canEdit: boolean;
+  onSendToFinance: () => void;
+  onMarkPaid: () => void;
+}) {
+  const requestWhlInvoice = useStore((s) => s.requestWhlInvoice);
+  const logInvoiceAccess = useStore((s) => s.logInvoiceAccess);
+  const pay = labPaymentOf(lot);
+  const inv = pay.invoice;
+  const unpaid = labFeeUnpaid(lot);
+  const gross = inv ? inv.amount + (inv.taxAmount ?? 0) : 0;
+
+  // nothing to bill before a work order exists
+  if (!lot.workOrderNo) return null;
+
+  return (
+    <div className={cn("mt-3 rounded-lg border p-3 text-xs", unpaid ? "bg-warn-bg/30" : "bg-card-2")}>
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <span className="inline-flex items-center gap-1.5 font-semibold uppercase tracking-wide text-muted-foreground">
+          <Receipt className="h-3.5 w-3.5" /> WHL invoice &amp; payment
+        </span>
+        <Pill tone={LAB_PAYMENT_TONE[pay.status]}>{LAB_PAYMENT_LABEL[pay.status]}</Pill>
+        {inv && <span className="font-mono text-foreground">{inv.invoiceNo}</span>}
+        {inv && <span className="tnum text-muted-foreground">{inv.currency} {gross.toLocaleString()}</span>}
+        {inv?.dueDate && unpaid && <span className="text-faint">due {inv.dueDate}</span>}
+      </div>
+
+      {!inv ? (
+        <p className="text-muted-foreground">
+          {pay.status === "REQUESTED"
+            ? <>Invoice requested{pay.requestedAt ? <> <span className="tnum text-faint">{pay.requestedAt}</span></> : null} — it arrives on the WHL thread, so <b className="text-foreground">Check WHL for updates</b> pulls it in.</>
+            : <>No invoice on file yet. The lab bills on booking, so it normally arrives with the first inbox sync.</>}
+        </p>
+      ) : (
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
+          <span>{inv.currency} {inv.amount.toLocaleString()} net{inv.taxAmount ? ` + tax ${inv.taxAmount.toLocaleString()}` : ""}</span>
+          <span>received {inv.receivedAt}</span>
+          {pay.sentToFinanceAt && <span>to finance {pay.sentToFinanceAt}{pay.sentToFinanceBy ? ` · ${pay.sentToFinanceBy}` : ""}</span>}
+          {pay.paidAt && <span className="text-ok">paid {pay.paidAt}{pay.paidRef ? ` · ref ${pay.paidRef}` : ""}</span>}
+          {inv.note && <span className="text-faint">{inv.note}</span>}
+        </div>
+      )}
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {!inv && (
+          <Button variant="outline" disabled={!canEdit} onClick={() => requestWhlInvoice(orderId, lot.id)}
+            title={canEdit ? "Email WHL for the testing invoice" : "Only SC / Mgmt may email WHL"}>
+            <Mail className="h-4 w-4" /> Request invoice
+          </Button>
+        )}
+        {inv && (
+          <Button variant="outline" onClick={() => logInvoiceAccess(orderId, lot.id, "DOWNLOAD")}
+            title={`Download ${inv.fileName} — access is logged`}>
+            <Download className="h-4 w-4" /> Download invoice
+          </Button>
+        )}
+        {inv && unpaid && (
+          <Button variant="outline" disabled={!canEdit} onClick={onSendToFinance}
+            title={canEdit ? "Email finance with the invoice attached to initiate payment" : "Only SC / Mgmt may send this"}>
+            <Landmark className="h-4 w-4" /> {pay.status === "SENT_TO_FINANCE" ? "Re-send to finance" : "Send to finance"}
+          </Button>
+        )}
+        {inv && unpaid && (
+          <Button variant="ghost" disabled={!canEdit} onClick={onMarkPaid}
+            title="Record the transfer finance released — this closes the Payment to WHL stage">
+            <Check className="h-4 w-4" /> Mark paid
+          </Button>
+        )}
+        {inv && (inv.accessLog ?? []).length > 0 && (
+          <span className="text-faint" title={inv.accessLog.map((a) => `${a.at} · ${a.by} · ${a.action}`).join("\n")}>
+            {inv.accessLog.length} access {inv.accessLog.length === 1 ? "entry" : "entries"}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

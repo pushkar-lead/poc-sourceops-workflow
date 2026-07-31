@@ -20,7 +20,7 @@ import {
   conclusionToLotStatus, processToTestStatus,
 } from "@/integrations/lab-whl";
 import { extractPoTestRequirements } from "@/integrations/doc-extract";
-import { WHL_CONTACT, whlTemplate, TESTING_STAGE_META, stageIdx } from "@/data/enums";
+import { WHL_CONTACT, whlTemplate, WHL_EMAIL_TEMPLATES, TESTING_STAGE_META, stageIdx } from "@/data/enums";
 import {
   escrowAgentFetchInvoice, escrowAgentFetchPoPi, escrowAgentFetchPaymentClosure,
   escrowAgentFetchHkinConfirmation, escrowAgentFetchWhlVerdict,
@@ -156,6 +156,10 @@ interface Store {
   // ---- testing lifecycle (the stage chain a lot walks while it's at the lab) ----
   recordSupplierDispatch: (orderId: string, lotId: string, d: Omit<LotDispatch, "recordedBy" | "recordedAt">) => void;
   setLotStage: (orderId: string, lotId: string, stage: TestingStage, note?: string) => void;
+  // ---- WHL's testing fee: ask for the invoice, hand it to finance, record the payment ----
+  requestWhlInvoice: (orderId: string, lotId: string) => void;
+  markLabFeePaid: (orderId: string, lotId: string, d: { paidRef?: string; paidAt?: string; note?: string }) => void;
+  logInvoiceAccess: (orderId: string, lotId: string, action: "VIEW" | "DOWNLOAD") => void;
   fetchWhlReport: (orderId: string, lotId: string) => void;           // pull (or revise) the report + parse it on screen
   requestWhlUpdate: (orderId: string, lotId: string) => void;         // pre-mapped outbound chase
   sendLabEmail: (orderId: string, m: { lotId?: string; subject: string; body: string }) => void;
@@ -639,6 +643,62 @@ export const useStore = create<Store>()(
         toast.success(moved ? "Dispatch recorded — waiting on WHL to confirm receipt" : "Dispatch details saved");
       },
 
+      /**
+       * Ask WHL for its testing invoice. Uses the same template source as the compose
+       * modal, and starts the fee clock so the roll-up can chase it.
+       */
+      requestWhlInvoice: (orderId, lotId) => {
+        const b0 = get().orders[orderId]; if (!b0) return;
+        const lot = b0.lots.find((x) => x.id === lotId); if (!lot) return;
+        const tpl = WHL_EMAIL_TEMPLATES.find((t) => t.id === "INVOICE_REQUEST"); if (!tpl) return;
+        const ctx = {
+          entity: b0.maskingEntity, mpn: lot.orderLineMpn, lotCode: lot.lotCode, dateCode: lot.dateCode,
+          qty: lot.qty, sampleQty: lot.sampleQty, workOrderNo: lot.workOrderNo, clientPoNo: lot.clientPoNo, lab: lot.lab,
+        };
+        set((s) => {
+          const l = s.orders[orderId]?.lots.find((x) => x.id === lotId); if (!l) return;
+          l.labPayment ??= { status: "NOT_REQUESTED" };
+          // don't walk a received/paid invoice backwards just because we chased again
+          if (l.labPayment.status === "NOT_REQUESTED") l.labPayment.status = "REQUESTED";
+          l.labPayment.requestedAt = stamp();
+        });
+        get().sendLabEmail(orderId, { lotId, subject: tpl.subject(ctx), body: tpl.body(ctx) });
+      },
+
+      /** Finance confirms the transfer — this is what closes the Payment-to-WHL stage. */
+      markLabFeePaid: (orderId, lotId, d) => {
+        let moved = false;
+        set((s) => {
+          const b = s.orders[orderId]; if (!b) return;
+          const lot = b.lots.find((x) => x.id === lotId); if (!lot) return;
+          const inv = lot.labPayment?.invoice;
+          lot.labPayment ??= { status: "NOT_REQUESTED" };
+          lot.labPayment.status = "PAID";
+          lot.labPayment.paidAt = d.paidAt ?? stamp();
+          lot.labPayment.paidRef = d.paidRef;
+          if (d.note) lot.labPayment.note = d.note;
+          moved = moveStage(lot, "WHL_PAYMENT", ME, {
+            note: `Testing fee paid${inv ? ` — invoice ${inv.invoiceNo}, ${inv.currency} ${(inv.amount + (inv.taxAmount ?? 0)).toLocaleString()}` : ""}${d.paidRef ? ` · ref ${d.paidRef}` : ""}.`,
+            manual: true,
+          });
+          b.events.unshift({
+            id: uid("ev"), eventType: "GENERAL",
+            message: `WHL testing fee paid for ${lot.lotCode} (${lot.orderLineMpn})${inv ? ` — invoice ${inv.invoiceNo}` : ""}${d.paidRef ? ` · ref ${d.paidRef}` : ""}.`,
+            source: "WHL", occurredAt: today(), recordedBy: ME,
+          });
+        });
+        toast.success(moved ? "Fee paid — Payment to WHL recorded" : "Fee marked paid");
+      },
+
+      /** NDA-style access log on the invoice, mirroring the report's. */
+      logInvoiceAccess: (orderId, lotId, action) => {
+        set((s) => {
+          const inv = s.orders[orderId]?.lots.find((x) => x.id === lotId)?.labPayment?.invoice; if (!inv) return;
+          (inv.accessLog ??= []).unshift({ at: stamp(), by: ME, action });
+        });
+        if (action === "DOWNLOAD") toast.success("Invoice downloaded (logged)");
+      },
+
       /** Manual stage correction — a phone call, or fixing a mis-step. Always logged. */
       setLotStage: (orderId, lotId, stage, note) => {
         set((s) => {
@@ -777,6 +837,9 @@ export const useStore = create<Store>()(
         const wos = b0.lots.filter((l) => !!l.workOrderNo).map((l) => ({
           workOrderNo: l.workOrderNo!, lotCode: l.lotCode, mpn: l.orderLineMpn, testNames: (l.tests ?? []).map((t) => t.name),
           stage: lotStage(l),
+          // so the lab issues its invoice once and can chase it while it's unpaid
+          hasInvoice: !!l.labPayment?.invoice,
+          feePaid: l.labPayment?.status === "PAID",
         }));
         if (wos.length === 0) { toast.error("No WHL work orders on this order yet."); return; }
         toast.message("Checking the WHL mailbox…");
@@ -785,6 +848,7 @@ export const useStore = create<Store>()(
             const res = await whlPollInbox({ workOrders: wos });
             let matched = 0, unmatched = 0;
             const advanced: string[] = [];
+            const invoiced: string[] = [];
             set((s) => {
               const b = s.orders[orderId]; if (!b) return;
               b.labEmails ??= [];
@@ -796,7 +860,8 @@ export const useStore = create<Store>()(
                   workOrderNo: msg.workOrderNo, poNo: lot?.clientPoNo, subject: msg.subject, body: msg.body,
                   at: msg.receivedAt, by: "WHL Reports",
                   status: !lot ? "AWAITING_RESPONSE" : msg.kind === "REPORT" ? "REPORT_DELIVERED" : "UPDATE_RECEIVED",
-                  kind: msg.kind === "REPORT" ? "REPORT" : "STATUS_UPDATE", attachments: msg.attachments,
+                  kind: msg.kind === "REPORT" ? "REPORT" : msg.kind === "INVOICE" ? "INVOICE" : "STATUS_UPDATE",
+                  attachments: msg.attachments,
                   matchNote: lot ? undefined : "Subject line carries no work order, lot or report number — match it manually.",
                 };
                 b.labEmails.unshift(em);
@@ -813,6 +878,27 @@ export const useStore = create<Store>()(
                   t.history.push(auditRow({ by: WHL_BOT, action: "STATUS", target: u.name, before, after: u.status, note: u.note ?? msg.subject, sourceEmailId: em.id }));
                 }
                 if (msg.kind === "REPORT") lot.lastUpdateRequestAt = undefined;
+                // the lab's own invoice for the testing service — store it and file the PDF
+                if (msg.invoice) {
+                  lot.labPayment ??= { status: "NOT_REQUESTED" };
+                  if (!lot.labPayment.invoice) {
+                    lot.labPayment.invoice = {
+                      id: uid("inv"), invoiceNo: msg.invoice.invoiceNo, amount: msg.invoice.amount,
+                      taxAmount: msg.invoice.taxAmount, currency: msg.invoice.currency,
+                      fileName: msg.invoice.fileName, receivedAt: msg.receivedAt,
+                      dueDate: msg.invoice.dueDate,
+                      note: `${msg.invoice.processCount} process(es) billed against WO ${msg.workOrderNo ?? "—"}.`,
+                      accessLog: [],
+                    };
+                    // a paid fee stays paid; otherwise the invoice is now ours to settle
+                    if (lot.labPayment.status !== "PAID") lot.labPayment.status = "INVOICE_RECEIVED";
+                    b.documents.push({
+                      id: uid("doc"), subjectType: "LOT", docType: "WHL_INVOICE",
+                      fileName: msg.invoice.fileName, uploadedBy: "WHL (email)", uploadedAt: today(),
+                    });
+                    invoiced.push(`${lot.lotCode} → invoice ${msg.invoice.invoiceNo}`);
+                  }
+                }
                 // lifecycle: the mail says where the lot now is (receipt / started / in
                 // progress / report being written). Forward-only, so a late-arriving
                 // interim mail can't drag a finished lot back down the chain.
@@ -823,7 +909,8 @@ export const useStore = create<Store>()(
                   .forEach((x) => { x.status = "UPDATE_RECEIVED"; });
               }
             });
-            if (advanced.length) toast.success(advanced.join(" · "));
+            if (invoiced.length) toast.success(invoiced.join(" · "));
+            else if (advanced.length) toast.success(advanced.join(" · "));
             else toast.success(`${matched} update(s) applied${unmatched ? ` · ${unmatched} need manual matching` : ""}`);
           } catch (e) { toast.error(`WHL inbox: ${errMsg(e)}`); }
         })();
@@ -879,12 +966,17 @@ export const useStore = create<Store>()(
         const b0 = get().orders[orderId]; if (!b0) return;
         const lot = b0.lots.find((x) => x.id === lotId); if (!lot) return;
         const rep = (lot.reports ?? []).find((r) => r.current) ?? (lot.reports ?? [])[0];
-        const attachments = m.attachReport && rep ? [rep.fileName] : [];
+        const inv = lot.labPayment?.invoice;
+        // the finance mail carries the lab's INVOICE, not the test report
+        const attachments = m.party === "FINANCE"
+          ? (m.attachReport && inv ? [inv.fileName] : [])
+          : (m.attachReport && rep ? [rep.fileName] : []);
         const noteFor: Record<NotifyParty, string> = {
           SUPPLIER: "Masked — buyer identity, client PO and sell price withheld.",
           BUYER: "Masked — supplier identity, buy price and inbound AWB withheld.",
           ESCROW: "Release-trigger evidence for the escrow provider.",
           WHL: "Acknowledgement to the laboratory.",
+          FINANCE: "Internal — lab testing fee for payment. Booked to the order, not the supplier's material payment.",
         };
         const nId = uid("ntf");
         set((s) => {
@@ -892,8 +984,16 @@ export const useStore = create<Store>()(
           (l.notifications ??= []).unshift({
             id: nId, party: m.party, to: m.to, subject: m.subject, body: m.body, attachments,
             reportNo: rep?.reportNo, at: stamp(), by: ME, status: "SENT",
-            note: attachments.length ? `${noteFor[m.party]} Report shared under NDA — internal use by the recipient only.` : noteFor[m.party],
+            note: attachments.length && m.party !== "FINANCE"
+              ? `${noteFor[m.party]} Report shared under NDA — internal use by the recipient only.`
+              : noteFor[m.party],
           });
+          // handing the invoice to finance IS the payment initiation — record it
+          if (m.party === "FINANCE" && l.labPayment?.invoice) {
+            l.labPayment.status = "SENT_TO_FINANCE";
+            l.labPayment.sentToFinanceAt = stamp();
+            l.labPayment.sentToFinanceBy = ME;
+          }
         });
         toast.message(`Notifying ${m.party.toLowerCase()}…`);
         void (async () => {
@@ -906,7 +1006,9 @@ export const useStore = create<Store>()(
               const bb = s.orders[orderId]; if (!bb) return;
               bb.events.unshift({
                 id: uid("ev"), eventType: "GENERAL",
-                message: `${lot.lotCode} (${lot.orderLineMpn}) result ${rep ? `${rep.reportNo} — ${rep.conclusion.replace(/_/g, " ").toLowerCase()}` : ""} notified to ${m.party.toLowerCase()} (${res.to})${attachments.length ? " with the report attached" : ""}.`,
+                message: m.party === "FINANCE"
+                  ? `${lot.lotCode} (${lot.orderLineMpn}) — WHL invoice ${inv?.invoiceNo ?? "(awaited)"} sent to finance (${res.to}) to initiate payment${attachments.length ? " with the invoice attached" : ""}.`
+                  : `${lot.lotCode} (${lot.orderLineMpn}) result ${rep ? `${rep.reportNo} — ${rep.conclusion.replace(/_/g, " ").toLowerCase()}` : ""} notified to ${m.party.toLowerCase()} (${res.to})${attachments.length ? " with the report attached" : ""}.`,
                 source: "NOTIFY", occurredAt: today(), recordedBy: ME,
               });
               // escrow gets a log entry so the release decision has a paper trail
@@ -944,8 +1046,11 @@ export const useStore = create<Store>()(
         const lots = b0.lots.filter((l) => lotIds.includes(l.id));
         if (lots.length === 0) { toast.error("No lots selected."); return; }
         const reportOf = (l: (typeof lots)[number]) => (l.reports ?? []).find((r) => r.current) ?? (l.reports ?? [])[0];
+        // a finance run attaches the lab's INVOICES; every other party gets the reports
+        const docOf = (l: (typeof lots)[number]) =>
+          m.party === "FINANCE" ? l.labPayment?.invoice?.fileName : reportOf(l)?.fileName;
         const attachments = m.attachReports
-          ? Array.from(new Set(lots.map((l) => reportOf(l)?.fileName).filter((f): f is string => !!f)))
+          ? Array.from(new Set(lots.map(docOf).filter((f): f is string => !!f)))
           : [];
         const coverage = `Sent as one digest covering ${lots.length} lot(s): ${lots.map((l) => l.lotCode).join(", ")}.`;
         const nIds = lots.map((l) => ({ lotId: l.id, id: uid("ntf") }));
@@ -956,8 +1061,16 @@ export const useStore = create<Store>()(
             (l.notifications ??= []).unshift({
               id: nId, party: m.party, to: m.to, subject: m.subject, body: m.body, attachments,
               reportNo: reportOf(l)?.reportNo, at: stamp(), by: ME, status: "SENT",
-              note: `${coverage}${attachments.length ? " Report(s) shared under NDA — internal use by the recipient only." : ""}`,
+              note: m.party === "FINANCE"
+                ? `${coverage} Lab testing fees for payment — booked to the order, not the supplier's material payment.`
+                : `${coverage}${attachments.length ? " Report(s) shared under NDA — internal use by the recipient only." : ""}`,
             });
+            // one payment run moves every invoice it covered to "with finance"
+            if (m.party === "FINANCE" && l.labPayment?.invoice && l.labPayment.status !== "PAID") {
+              l.labPayment.status = "SENT_TO_FINANCE";
+              l.labPayment.sentToFinanceAt = stamp();
+              l.labPayment.sentToFinanceBy = ME;
+            }
           }
         });
         toast.message(`Notifying ${m.party.toLowerCase()} about ${lots.length} lot(s)…`);
@@ -971,7 +1084,9 @@ export const useStore = create<Store>()(
               const bb = s.orders[orderId]; if (!bb) return;
               bb.events.unshift({
                 id: uid("ev"), eventType: "GENERAL",
-                message: `${lots.length} lot(s) (${lots.map((l) => l.lotCode).join(", ")}) notified to ${m.party.toLowerCase()} (${res.to}) in one digest${attachments.length ? ` with ${attachments.length} report(s) attached` : ""}.`,
+                message: m.party === "FINANCE"
+                  ? `${attachments.length} WHL invoice(s) across ${lots.length} lot(s) (${lots.map((l) => l.lotCode).join(", ")}) sent to finance (${res.to}) as one payment run.`
+                  : `${lots.length} lot(s) (${lots.map((l) => l.lotCode).join(", ")}) notified to ${m.party.toLowerCase()} (${res.to}) in one digest${attachments.length ? ` with ${attachments.length} report(s) attached` : ""}.`,
                 source: "NOTIFY", occurredAt: today(), recordedBy: ME,
               });
               if (m.party === "ESCROW" && bb.escrow) {

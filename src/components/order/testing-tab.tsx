@@ -5,12 +5,12 @@ import { useRouter } from "next/navigation";
 import {
   Plus, Trash2, Pencil, History, Wand2, RefreshCw, Mail, MailQuestion, FileText, Download, Eye,
   AlertTriangle, ShieldAlert, Lock, ChevronRight, ChevronDown, Check, FlaskConical, Clock,
-  Zap, Truck, Factory, Users, Landmark, Layers,
+  Zap, Truck, Factory, Users, Landmark, Layers, Receipt,
 } from "lucide-react";
 import type { OrderBundle, Lot, LotTest, WhlReport, LabEmail, TestProcessStatus, NotifyParty } from "@/types";
 import {
   TEST_STANDARDS, WHL_PROCESSES, TEST_PROCESS_STATUSES, WHL_CONTACT, WHL_SLA_BUSINESS_DAYS,
-  WHL_EMAIL_TEMPLATES, statusTone, stageLabel,
+  WHL_EMAIL_TEMPLATES, statusTone, stageLabel, LAB_PAYMENT_TONE,
 } from "@/data/enums";
 import { Panel, Pill, StatusPill, Button, Progress, Field } from "@/components/ui/primitives";
 import { Select } from "@/components/ui/form";
@@ -19,9 +19,13 @@ import { useRole } from "@/lib/role";
 import {
   specForMpn, lotTestProgress, currentReport, lotEmails, unmatchedEmails,
   testAutofillGaps, overdueUpdateRequests, reconciliationAlerts, testingSummary, lotResults, lotStageProgress,
+  labFeeUnpaid, labPaymentOf, labFeeOutstandingTotal,
 } from "@/store/selectors";
 import { qtyfmt, cn } from "@/lib/utils";
-import { ComposeWhlEmailModal, MatchLabEmailModal, NotifyLotResultModal, BulkNotifyModal, RecordDispatchModal } from "@/components/order/modals";
+import {
+  ComposeWhlEmailModal, MatchLabEmailModal, NotifyLotResultModal, BulkNotifyModal,
+  RecordDispatchModal, MarkLabFeePaidModal,
+} from "@/components/order/modals";
 import { TestingStageChain, TestingStageBar } from "@/components/order/testing-stages";
 
 type Sub = "mpns" | "lots" | "mail";
@@ -116,8 +120,10 @@ export function TestingTab({
   const [sel, setSel] = useState<string[]>([]);   // lot ids ticked for a combined action
   const [match, setMatch] = useState<LabEmail | null>(null);
   const [dispatch, setDispatch] = useState<string | null>(null); // lot id whose dispatch is being recorded
-  const [track, setTrack] = useState<string | null>(null);       // lot id whose lifecycle is expanded in the roll-up
+  const [track, setTrack] = useState<string | null>(null);
+  const [paid, setPaid] = useState<string | null>(null);           // lot id whose lab fee is being marked paid       // lot id whose lifecycle is expanded in the roll-up
   const { canEditTests, canEmailLab } = useRole();
+  const fees = labFeeOutstandingTotal(b);   // lab fees still owed across the order
 
   const autofillMpnTests = useStore((s) => s.autofillMpnTests);
   const syncWhlInbox = useStore((s) => s.syncWhlInbox);
@@ -281,7 +287,9 @@ export function TestingTab({
                     <tr className="border-b last:border-0 bg-card-2/60">
                       <td colSpan={10} className="px-3 py-3">
                         <TestingStageChain orderId={id} lot={r.lot} canEdit={canEditTests}
-                          onRecordDispatch={() => setDispatch(r.lot.id)} />
+                          onRecordDispatch={() => setDispatch(r.lot.id)}
+                          onSendToFinance={() => setNotify({ lotId: r.lot.id, party: "FINANCE" })}
+                          onMarkPaid={() => setPaid(r.lot.id)} />
                       </td>
                     </tr>
                   )}
@@ -329,6 +337,13 @@ export function TestingTab({
                 {unmatched.length} inbound WHL email(s) couldn&apos;t be matched to a lot — held for manual matching.
               </Notice>
             )}
+            {fees.count > 0 && (
+              <Notice tone="warn" icon={<Receipt className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+                action={<button className="font-medium underline" onClick={() => setSub("lots")}>Open lots</button>}>
+                <b>{fees.count} WHL invoice(s) unpaid</b> — {fees.currency} {fees.gross.toLocaleString()} owed to the lab.
+                Send them to finance from the lot, or tick the lots and use <b>Next actions → Send invoices to finance</b>.
+              </Notice>
+            )}
           </div>
         )}
 
@@ -362,7 +377,7 @@ export function TestingTab({
       {sub === "mpns" && <MpnTestsSection b={b} id={id} canEdit={canEditTests} onlyMpn={scoped?.orderLineMpn} />}
       {sub === "lots" && <LotsSection b={b} id={id} onlyLotId={lotId} canEdit={canEditTests} canEmail={canEmailLab}
         onCompose={(l, t) => setCompose({ lotId: l, templateId: t })} onNotify={(l, p) => setNotify({ lotId: l, party: p })}
-        onDispatch={setDispatch} />}
+        onDispatch={setDispatch} onMarkPaid={setPaid} />}
       {sub === "mail" && <MailSection key={lotId ?? "ALL"} b={b} id={id} defaultLotId={lotId} canEmail={canEmailLab} onCompose={(l, t) => setCompose({ lotId: l, templateId: t })} onMatch={setMatch} />}
 
       {compose && <ComposeWhlEmailModal orderId={id} lotId={compose.lotId} templateId={compose.templateId} onClose={() => setCompose(null)} />}
@@ -370,6 +385,7 @@ export function TestingTab({
       {bulk && <BulkNotifyModal orderId={id} lotIds={sel} party={bulk} onClose={() => setBulk(null)} />}
       {match && <MatchLabEmailModal orderId={id} email={match} onClose={() => setMatch(null)} />}
       {dispatch && <RecordDispatchModal orderId={id} lotId={dispatch} onClose={() => setDispatch(null)} />}
+      {paid && <MarkLabFeePaidModal orderId={id} lotId={paid} onClose={() => setPaid(null)} />}
     </div>
   );
 }
@@ -565,8 +581,8 @@ function MpnTestsSection({ b, id, canEdit, onlyMpn }: { b: OrderBundle; id: stri
 // ==================== 2 · lots: status tracker + report repository ====================
 
 function LotsSection({
-  b, id, onlyLotId, canEdit, canEmail, onCompose, onNotify, onDispatch,
-}: { b: OrderBundle; id: string; onlyLotId?: string; canEdit: boolean; canEmail: boolean; onCompose: (lotId: string, templateId?: string) => void; onNotify: (lotId: string, party: NotifyParty) => void; onDispatch: (lotId: string) => void }) {
+  b, id, onlyLotId, canEdit, canEmail, onCompose, onNotify, onDispatch, onMarkPaid,
+}: { b: OrderBundle; id: string; onlyLotId?: string; canEdit: boolean; canEmail: boolean; onCompose: (lotId: string, templateId?: string) => void; onNotify: (lotId: string, party: NotifyParty) => void; onDispatch: (lotId: string) => void; onMarkPaid: (lotId: string) => void }) {
   const [openLots, setOpenLots] = useState<Set<string>>(new Set());
   if (b.lots.length === 0) return <Empty text="No lots yet — add one to start a WHL / self-test record." />;
   const lots = onlyLotId ? b.lots.filter((l) => l.id === onlyLotId) : b.lots;
@@ -589,7 +605,7 @@ function LotsSection({
       {lots.map((lot) => (
         <LotCard key={lot.id} b={b} id={id} lot={lot} canEdit={canEdit} canEmail={canEmail}
           open={isOpen(lot.id)} onToggle={() => toggle(lot.id)}
-          onCompose={onCompose} onNotify={onNotify} onDispatch={onDispatch} />
+          onCompose={onCompose} onNotify={onNotify} onDispatch={onDispatch} onMarkPaid={onMarkPaid} />
       ))}
     </div>
   );
@@ -605,6 +621,13 @@ function BulkActionsMenu({
   const withReport = lots.filter((l) => (l.reports ?? []).length > 0).length;
   const clientPos = new Set(lots.map((l) => l.clientPoNo ?? "—"));
   const none = lots.length === 0;
+  // a payment run: only lots whose lab invoice has arrived and is still unpaid
+  const payable = lots.filter((l) => !!l.labPayment?.invoice && labFeeUnpaid(l));
+  const payableGross = payable.reduce((a, l) => {
+    const i = l.labPayment!.invoice!;
+    return a + i.amount + (i.taxAmount ?? 0);
+  }, 0);
+  const payCur = payable[0]?.labPayment?.invoice?.currency ?? "USD";
 
   const item = (label: string, sub: string, icon: React.ReactNode, onClick: () => void, disabled?: boolean) => (
     <button type="button" disabled={disabled} onClick={() => { setOpen(false); onClick(); }}
@@ -638,6 +661,10 @@ function BulkActionsMenu({
               () => onBulk("ESCROW"), !canEmail || !b.escrow)}
             {item("Acknowledge to WHL", `Confirm ${withReport} report(s) received`, <FlaskConical className="h-4 w-4" />,
               () => onBulk("WHL"), !canEmail || withReport === 0)}
+            {item("Send invoices to finance", payable.length
+              ? `Payment run — ${payable.length} unpaid invoice(s), ${payCur} ${payableGross.toLocaleString()}`
+              : "No unpaid WHL invoice among the selected lots", <Receipt className="h-4 w-4" />,
+              () => onBulk("FINANCE"), !canEmail || payable.length === 0)}
             <div className="my-1 border-t" />
             {item("Arrange logistics for these lots", "Opens Logistics with one shipment covering the selection", <Truck className="h-4 w-4" />,
               () => router.push(`/fulfilment/logistics?order=${id}&lots=${selected.join(",")}`))}
@@ -705,8 +732,8 @@ function NextActionsMenu({
 }
 
 function LotCard({
-  b, id, lot, canEdit, canEmail, open, onToggle, onCompose, onNotify, onDispatch,
-}: { b: OrderBundle; id: string; lot: Lot; canEdit: boolean; canEmail: boolean; open: boolean; onToggle: () => void; onCompose: (lotId: string, templateId?: string) => void; onNotify: (lotId: string, party: NotifyParty) => void; onDispatch: (lotId: string) => void }) {
+  b, id, lot, canEdit, canEmail, open, onToggle, onCompose, onNotify, onDispatch, onMarkPaid,
+}: { b: OrderBundle; id: string; lot: Lot; canEdit: boolean; canEmail: boolean; open: boolean; onToggle: () => void; onCompose: (lotId: string, templateId?: string) => void; onNotify: (lotId: string, party: NotifyParty) => void; onDispatch: (lotId: string) => void; onMarkPaid: (lotId: string) => void }) {
   const setLotStatus = useStore((s) => s.setLotStatus);
   const fetchWhlReport = useStore((s) => s.fetchWhlReport);
   const requestWhlUpdate = useStore((s) => s.requestWhlUpdate);
@@ -740,6 +767,11 @@ function LotCard({
         </span>
         {report ? <span className="font-mono text-faint">{report.reportNo}</span> : <span className="text-warn">no report</span>}
         {blocker && <Pill tone={p.failed > 0 ? "bad" : "warn"}>{blocker}</Pill>}
+        {lot.workOrderNo && labFeeUnpaid(lot) && (
+          <Pill tone={LAB_PAYMENT_TONE[labPaymentOf(lot).status]}>
+            <Receipt className="h-3 w-3" /> fee {labPaymentOf(lot).status === "SENT_TO_FINANCE" ? "with finance" : "unpaid"}
+          </Pill>
+        )}
         {awaiting && <span title="Awaiting a WHL reply"><Clock className="h-3.5 w-3.5 text-warn" /></span>}
       </>}
       actions={<div className="flex flex-wrap items-center gap-2">
@@ -754,7 +786,10 @@ function LotCard({
 
       {/* ---- lifecycle chain: where the lot physically is, before what was tested ---- */}
       <div className="mb-4">
-        <TestingStageChain orderId={id} lot={lot} canEdit={canEdit} onRecordDispatch={() => onDispatch(lot.id)} />
+        <TestingStageChain orderId={id} lot={lot} canEdit={canEdit}
+          onRecordDispatch={() => onDispatch(lot.id)}
+          onSendToFinance={() => onNotify(lot.id, "FINANCE")}
+          onMarkPaid={() => onMarkPaid(lot.id)} />
       </div>
 
       {/* ---- 3 · per-test status tracker ---- */}

@@ -17,6 +17,7 @@ export type TestProcessStatus = "PENDING" | "IN_PROGRESS" | "PASSED" | "FAILED" 
  */
 export type TestingStage =
   | "TEST_REQUESTED"
+  | "WHL_PAYMENT"
   | "SUPPLIER_DISPATCHING"
   | "COMPONENTS_RECEIVED"
   | "TESTING_STARTED"
@@ -299,14 +300,49 @@ export interface LabEmail {
   at: string;
   by: string;                 // sender ("You (demo)" / "WHL Reports")
   status: LabEmailStatus;
-  kind: "REQUEST_UPDATE" | "CUSTOM" | "STATUS_UPDATE" | "REPORT" | "ESCALATION";
+  kind: "REQUEST_UPDATE" | "CUSTOM" | "STATUS_UPDATE" | "REPORT" | "ESCALATION" | "INVOICE";
   attachments?: string[];
   matchedBy?: string;         // set when an operator resolved it out of the manual-match queue
   matchNote?: string;         // why auto-matching failed
 }
 
 /** Who we notify once a lot's result is in. Buyer/supplier mails stay masked from each other. */
-export type NotifyParty = "SUPPLIER" | "BUYER" | "ESCROW" | "WHL";
+export type NotifyParty = "SUPPLIER" | "BUYER" | "ESCROW" | "WHL" | "FINANCE";
+
+/**
+ * WHL's own invoice for the testing service — a separate document from the test report,
+ * arriving by mail the same way. Kept per lot because the lab invoices per work order.
+ */
+export interface LabInvoice {
+  id: string;
+  invoiceNo: string;
+  amount: number;             // net of tax
+  taxAmount?: number;
+  currency: string;
+  fileName: string;
+  receivedAt: string;
+  dueDate?: string;
+  note?: string;
+  accessLog: { at: string; by: string; action: "VIEW" | "DOWNLOAD" }[];
+}
+
+/**
+ * How far the lab's fee has got: we ask for the invoice, it arrives, we hand it to
+ * finance, finance pays. Distinct from the lifecycle stage — the stage says "settled or
+ * not", this says where in the settling we are.
+ */
+export type LabPaymentStatus = "NOT_REQUESTED" | "REQUESTED" | "INVOICE_RECEIVED" | "SENT_TO_FINANCE" | "PAID";
+
+export interface LabPayment {
+  status: LabPaymentStatus;
+  invoice?: LabInvoice;
+  requestedAt?: string;       // we asked WHL for the invoice
+  sentToFinanceAt?: string;   // the finance mail that initiates payment
+  sentToFinanceBy?: string;
+  paidAt?: string;
+  paidRef?: string;           // wire / UTR reference finance came back with
+  note?: string;
+}
 
 export interface LotNotification {
   id: string;
@@ -357,7 +393,8 @@ export interface Lot {
   stage?: TestingStage;       // where this lot sits in the testing lifecycle
   stageHistory?: TestingStageEvent[]; // timestamped progression through the chain
   dispatch?: LotDispatch;     // supplier → WHL leg, recorded when the supplier tells us
-  notifications?: LotNotification[]; // result circulated to supplier / buyer / escrow / WHL
+  labPayment?: LabPayment;    // WHL's testing invoice and its settlement
+  notifications?: LotNotification[]; // result circulated to supplier / buyer / escrow / WHL / finance
 }
 
 export interface JourneyStep {

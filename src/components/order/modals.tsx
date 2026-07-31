@@ -6,11 +6,12 @@ import { Dialog } from "@/components/ui/dialog";
 import { Labeled, Input, Select, Textarea } from "@/components/ui/form";
 import { Button } from "@/components/ui/primitives";
 import { useStore } from "@/store/store";
-import { remainingToShipLeg, remainingToAllocate, sourcedForClientLine, orderSourcedForClient, deliveredForClientLine } from "@/store/selectors";
+import { remainingToShipLeg, remainingToAllocate, sourcedForClientLine, orderSourcedForClient, deliveredForClientLine, escrowRemaining } from "@/store/selectors";
 import { computeDuty } from "@/lib/fx";
 import { money, fmtAddress } from "@/lib/utils";
+import { WHL_CONTACT, WHL_EMAIL_TEMPLATES, whlTemplate, notifyTemplate, notifyDigest, type WhlMailCtx, type NotifyCtx } from "@/data/enums";
 import type {
-  PaymentDirection, PaymentMode, ShipmentLeg, JourneyPhase, TradeType, TestingMode,
+  PaymentDirection, PaymentMode, ShipmentLeg, JourneyPhase, TradeType, TestingMode, LabEmail, NotifyParty,
 } from "@/types";
 
 const PHASES: JourneyPhase[] = ["KICKOFF", "PAYMENT", "TESTING", "EXPORT", "IMPORT", "CUSTOMS", "RELABEL", "DELIVERY", "CLOSE"];
@@ -63,6 +64,310 @@ export function AddLotModal({ orderId, onClose }: { orderId: string; onClose: ()
           <Labeled label="Lot qty"><Input type="number" value={qty} onChange={(e) => setQty(+e.target.value)} /></Labeled>
           <Labeled label="Sample qty"><Input type="number" value={sampleQty} onChange={(e) => setSampleQty(+e.target.value)} /></Labeled>
         </div>
+      </div>
+    </Dialog>
+  );
+}
+
+/**
+ * Compose to WHL — pre-filled with the lot's MPN / lot code / PO / work order so the
+ * operator never has to look up WHL's address or reference numbers. In-app send logs
+ * the message against the lot; "mailto" is offered as the quick fallback.
+ */
+export function ComposeWhlEmailModal({
+  orderId, lotId, templateId, onClose,
+}: { orderId: string; lotId?: string; templateId?: string; onClose: () => void }) {
+  const b = useStore((s) => s.orders[orderId]);
+  const sendLabEmail = useStore((s) => s.sendLabEmail);
+
+  // context for the templates — pulled off the lot so nothing has to be typed or looked up
+  const ctxFor = (lid: string): WhlMailCtx => {
+    const l = b?.lots.find((x) => x.id === lid);
+    const rep = l ? (l.reports ?? []).find((r) => r.current) : undefined;
+    return {
+      entity: b?.maskingEntity ?? "1Buy", mpn: l?.orderLineMpn, lotCode: l?.lotCode, qty: l?.qty,
+      sampleQty: l?.sampleQty, workOrderNo: l?.workOrderNo, clientPoNo: l?.clientPoNo,
+      reportNo: rep?.reportNo ?? l?.reportNo, lab: l?.lab, dateCode: l?.dateCode,
+    };
+  };
+
+  const [lot, setLot] = useState(lotId ?? b?.lots[0]?.id ?? "");
+  const [tplId, setTplId] = useState(templateId ?? WHL_EMAIL_TEMPLATES[0].id);
+  const [subject, setSubject] = useState(() => whlTemplate(templateId ?? WHL_EMAIL_TEMPLATES[0].id).subject(ctxFor(lotId ?? b?.lots[0]?.id ?? "")));
+  const [body, setBody] = useState(() => whlTemplate(templateId ?? WHL_EMAIL_TEMPLATES[0].id).body(ctxFor(lotId ?? b?.lots[0]?.id ?? "")));
+  const [edited, setEdited] = useState(false); // don't clobber the operator's edits on a re-pick
+
+  if (!b) return null;
+  const tpl = whlTemplate(tplId);
+
+  // re-fill subject + body from a template (called on template / lot change, and on "reset")
+  const fill = (id: string, lid: string) => {
+    const t = whlTemplate(id);
+    const c = ctxFor(lid);
+    setSubject(t.subject(c));
+    setBody(t.body(c));
+    setEdited(false);
+  };
+
+  const mailto = `mailto:${WHL_CONTACT}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  const save = () => { if (!subject.trim() || !body.trim()) return; sendLabEmail(orderId, { lotId: lot || undefined, subject, body }); onClose(); };
+
+  return (
+    <Dialog open onClose={onClose} title="Email WHL"
+      footer={<>
+        <a href={mailto} className="rounded-lg px-3 py-1.5 text-sm font-medium text-muted-foreground hover:bg-muted">Open in mail client</a>
+        <Footer onClose={onClose} onSave={save} saveLabel="Send & log" disabled={!subject.trim() || !body.trim()} />
+      </>}>
+      <div className="space-y-3">
+        <div className="rounded-lg bg-muted p-2.5 text-xs text-muted-foreground">
+          To <b className="text-foreground">{WHL_CONTACT}</b> — pick a template, tweak the wording, send.
+          Sending in-app keeps the message on the lot&apos;s thread instead of in someone&apos;s Sent items.
+        </div>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <Labeled label="Template" hint={tpl.hint}>
+            <Select value={tplId} onChange={(e) => { const v = e.target.value; setTplId(v); fill(v, lot); }}>
+              {WHL_EMAIL_TEMPLATES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+            </Select>
+          </Labeled>
+          <Labeled label="Lot (references auto-filled)">
+            <Select value={lot} onChange={(e) => { const v = e.target.value; setLot(v); fill(tplId, v); }}>
+              <option value="">— no specific lot —</option>
+              {b.lots.map((x) => <option key={x.id} value={x.id}>{x.lotCode} · {x.orderLineMpn} · WO {x.workOrderNo ?? "—"}</option>)}
+            </Select>
+          </Labeled>
+        </div>
+        <Labeled label="Subject"><Input value={subject} onChange={(e) => { setSubject(e.target.value); setEdited(true); }} /></Labeled>
+        <Labeled label="Message" hint="pre-filled from the template — edit freely">
+          <Textarea className="min-h-[220px] font-mono text-xs" value={body} onChange={(e) => { setBody(e.target.value); setEdited(true); }} />
+        </Labeled>
+        {edited && (
+          <button type="button" onClick={() => fill(tplId, lot)} className="text-xs font-medium text-primary hover:underline">
+            Reset to the “{tpl.label}” template
+          </button>
+        )}
+      </div>
+    </Dialog>
+  );
+}
+
+/**
+ * "The result is in — tell someone." Pre-filled per counterparty from the lot + its
+ * current report; the operator edits and sends. Supplier and buyer templates are
+ * masked from each other, and attaching the report carries an NDA caveat.
+ */
+export function NotifyLotResultModal({
+  orderId, lotId, party, onClose,
+}: { orderId: string; lotId: string; party: NotifyParty; onClose: () => void }) {
+  const b = useStore((s) => s.orders[orderId]);
+  const notifyLotResult = useStore((s) => s.notifyLotResult);
+  const lot = b?.lots.find((x) => x.id === lotId);
+
+  const ctxFor = (): NotifyCtx => {
+    const rep = (lot?.reports ?? []).find((r) => r.current) ?? (lot?.reports ?? [])[0];
+    return {
+      entity: b?.maskingEntity ?? "1Buy", orderNo: b?.orderNo ?? "—", mpn: lot?.orderLineMpn ?? "—",
+      lotCode: lot?.lotCode ?? "—", qty: lot?.qty ?? 0, sampleQty: lot?.sampleQty, dateCode: lot?.dateCode,
+      reportNo: rep?.reportNo, reportDate: rep?.reportDate, workOrderNo: lot?.workOrderNo,
+      conclusion: rep?.conclusion, anyFar: rep?.anyFar, clientPoNo: lot?.clientPoNo,
+      supplierPoNo: b?.supplierPoNo, escrowRef: b?.escrow?.externalRef,
+      releasable: b ? escrowRemaining(b) : undefined, currency: b?.currency, lab: lot?.lab,
+    };
+  };
+
+  const [to, setTo] = useState(() => notifyTemplate(party).to(ctxFor()));
+  const [subject, setSubject] = useState(() => notifyTemplate(party).subject(ctxFor()));
+  const [body, setBody] = useState(() => notifyTemplate(party).body(ctxFor()));
+  const [attach, setAttach] = useState(party !== "WHL");
+  const [edited, setEdited] = useState(false);
+
+  if (!b || !lot) return null;
+  const tpl = notifyTemplate(party);
+  const rep = (lot.reports ?? []).find((r) => r.current) ?? (lot.reports ?? [])[0];
+  const reset = () => { const c = ctxFor(); setTo(tpl.to(c)); setSubject(tpl.subject(c)); setBody(tpl.body(c)); setEdited(false); };
+  const save = () => {
+    if (!to.trim() || !subject.trim() || !body.trim()) return;
+    notifyLotResult(orderId, lotId, { party, to: to.trim(), subject, body, attachReport: attach && !!rep });
+    onClose();
+  };
+
+  return (
+    <Dialog open onClose={onClose} title={tpl.label}
+      footer={<Footer onClose={onClose} onSave={save} saveLabel="Send notification" disabled={!to.trim() || !subject.trim() || !body.trim()} />}>
+      <div className="space-y-3">
+        <div className="rounded-lg bg-muted p-2.5 text-xs text-muted-foreground">
+          <b className="text-foreground">{lot.lotCode}</b> · <span className="font-mono">{lot.orderLineMpn}</span> · qty {lot.qty}
+          {rep ? <> · report <b className="text-foreground">{rep.reportNo}</b> — {rep.conclusion.replace(/_/g, " ").toLowerCase()}{rep.anyFar ? " (F.A.R. flagged)" : ""}</> : " · no report yet"}
+        </div>
+        {tpl.masking && <p className="rounded-lg border border-[color-mix(in_srgb,var(--warn)_40%,transparent)] bg-warn-bg px-2.5 py-2 text-xs text-warn">{tpl.masking}</p>}
+        <Labeled label="To" hint="mock address in the POC — edit freely"><Input value={to} onChange={(e) => { setTo(e.target.value); setEdited(true); }} /></Labeled>
+        <Labeled label="Subject"><Input value={subject} onChange={(e) => { setSubject(e.target.value); setEdited(true); }} /></Labeled>
+        <Labeled label="Message" hint="pre-filled from the template — edit before sending">
+          <Textarea className="min-h-[220px] font-mono text-xs" value={body} onChange={(e) => { setBody(e.target.value); setEdited(true); }} />
+        </Labeled>
+        <label className="flex items-start gap-2 text-sm">
+          <input type="checkbox" className="mt-0.5" checked={attach} disabled={!rep} onChange={(e) => setAttach(e.target.checked)} />
+          <span>
+            Attach the test report {rep ? <span className="font-mono text-xs">{rep.fileName}</span> : <span className="text-faint">(none received yet)</span>}
+            <span className="block text-[11px] text-muted-foreground">WHL reports are issued under NDA — attaching one records the disclosure on the lot&apos;s notification log.</span>
+          </span>
+        </label>
+        {edited && <button type="button" onClick={reset} className="text-xs font-medium text-primary hover:underline">Reset to the template</button>}
+      </div>
+    </Dialog>
+  );
+}
+
+/**
+ * Bulk sibling of NotifyLotResultModal: one digest mail for many lots.
+ *
+ * Buyer mails are split per client PO — one order can serve several clients, and a
+ * client must never see another client's lots. Supplier / escrow / lab are single
+ * recipients per order, so those go out as one mail.
+ */
+export function BulkNotifyModal({
+  orderId, lotIds, party, onClose,
+}: { orderId: string; lotIds: string[]; party: NotifyParty; onClose: () => void }) {
+  const b = useStore((s) => s.orders[orderId]);
+  const notifyLotsResult = useStore((s) => s.notifyLotsResult);
+
+  const lots = (b?.lots ?? []).filter((l) => lotIds.includes(l.id));
+  const repOf = (l: (typeof lots)[number]) => (l.reports ?? []).find((r) => r.current) ?? (l.reports ?? [])[0];
+  const withReport = lots.filter((l) => !!repOf(l));
+  const noReport = lots.filter((l) => !repOf(l));
+
+  // groups = one outbound mail each
+  const groups = party === "BUYER"
+    ? Array.from(new Set(lots.map((l) => l.clientPoNo ?? "—"))).map((po) => ({ key: po, lots: lots.filter((l) => (l.clientPoNo ?? "—") === po) }))
+    : [{ key: "ALL", lots }];
+
+  const digestFor = (grp: { key: string; lots: typeof lots }) => notifyDigest(party, {
+    entity: b?.maskingEntity ?? "1Buy", orderNo: b?.orderNo ?? "—",
+    supplierPoNo: b?.supplierPoNo, clientPoNo: party === "BUYER" && grp.key !== "ALL" ? grp.key : undefined,
+    escrowRef: b?.escrow?.externalRef, currency: b?.currency, releasable: b ? escrowRemaining(b) : undefined,
+    lots: grp.lots.map((l) => {
+      const r = repOf(l);
+      return { mpn: l.orderLineMpn, lotCode: l.lotCode, qty: l.qty, sampleQty: l.sampleQty, dateCode: l.dateCode,
+        reportNo: r?.reportNo, reportDate: r?.reportDate, conclusion: r?.conclusion, anyFar: r?.anyFar, lab: l.lab, workOrderNo: l.workOrderNo };
+    }),
+  });
+
+  const tpl = notifyTemplate(party);
+  const [active, setActive] = useState(0);          // which group we're previewing / editing
+  const [to, setTo] = useState<Record<string, string>>({});
+  const [subject, setSubject] = useState<Record<string, string>>({});
+  const [body, setBody] = useState<Record<string, string>>({});
+  const [attach, setAttach] = useState(party !== "WHL");
+
+  if (!b || lots.length === 0) return null;
+  const grp = groups[Math.min(active, groups.length - 1)];
+  const d = digestFor(grp);
+  const curTo = to[grp.key] ?? tpl.to({ entity: b.maskingEntity, orderNo: b.orderNo, mpn: "", lotCode: "", qty: 0 });
+  const curSubject = subject[grp.key] ?? d.subject;
+  const curBody = body[grp.key] ?? d.body;
+
+  const send = () => {
+    for (const g of groups) {
+      const gd = digestFor(g);
+      notifyLotsResult(orderId, g.lots.map((l) => l.id), {
+        party,
+        to: to[g.key] ?? tpl.to({ entity: b.maskingEntity, orderNo: b.orderNo, mpn: "", lotCode: "", qty: 0 }),
+        subject: subject[g.key] ?? gd.subject,
+        body: body[g.key] ?? gd.body,
+        attachReports: attach,
+      });
+    }
+    onClose();
+  };
+
+  return (
+    <Dialog open onClose={onClose} title={`${tpl.label} — ${lots.length} lot(s)`}
+      footer={<Footer onClose={onClose} onSave={send} saveLabel={`Send ${groups.length} mail${groups.length > 1 ? "s" : ""}`} disabled={!curTo.trim() || !curSubject.trim()} />}>
+      <div className="space-y-3">
+        <div className="rounded-lg bg-muted p-2.5 text-xs text-muted-foreground">
+          One digest instead of {lots.length} separate mails.
+          {party === "BUYER" && groups.length > 1 && <> Split into <b className="text-foreground">{groups.length} mails — one per client PO</b>, so no client sees another&apos;s lots.</>}
+        </div>
+        {tpl.masking && <p className="rounded-lg border border-[color-mix(in_srgb,var(--warn)_40%,transparent)] bg-warn-bg px-2.5 py-2 text-xs text-warn">{tpl.masking}</p>}
+        {noReport.length > 0 && (
+          <p className="rounded-lg border border-[color-mix(in_srgb,var(--warn)_40%,transparent)] bg-warn-bg px-2.5 py-2 text-xs text-warn">
+            {noReport.length} selected lot(s) have no report yet ({noReport.map((l) => l.lotCode).join(", ")}) — they are listed as “result pending”. {withReport.length} of {lots.length} carry a report.
+          </p>
+        )}
+
+        {groups.length > 1 && (
+          <div className="flex flex-wrap gap-1.5">
+            {groups.map((g, i) => (
+              <button key={g.key} type="button" onClick={() => setActive(i)}
+                className={`rounded-md border px-2.5 py-1 text-xs font-medium ${i === (active < groups.length ? active : 0) ? "border-primary bg-accent-soft text-primary" : "hover:border-primary"}`}>
+                {g.key} · {g.lots.length} lot(s)
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="rounded-lg border">
+          <div className="border-b bg-card-2 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Lots in this mail ({grp.lots.length})
+          </div>
+          <ul className="max-h-40 divide-y overflow-y-auto text-xs">
+            {grp.lots.map((l) => {
+              const r = repOf(l);
+              return (
+                <li key={l.id} className="flex flex-wrap items-center gap-2 px-3 py-1.5">
+                  <span className="font-medium">{l.lotCode}</span>
+                  <span className="font-mono text-muted-foreground">{l.orderLineMpn}</span>
+                  <span className="text-faint">qty {l.qty}</span>
+                  {r ? <span className={r.conclusion === "ACCEPTABLE" ? "text-ok" : "text-bad"}>{r.reportNo} · {r.conclusion.replace(/_/g, " ").toLowerCase()}{r.anyFar ? " (F.A.R.)" : ""}</span>
+                     : <span className="text-warn">no report yet</span>}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+
+        <Labeled label="To" hint="mock address in the POC — edit freely">
+          <Input value={curTo} onChange={(e) => setTo((p) => ({ ...p, [grp.key]: e.target.value }))} />
+        </Labeled>
+        <Labeled label="Subject">
+          <Input value={curSubject} onChange={(e) => setSubject((p) => ({ ...p, [grp.key]: e.target.value }))} />
+        </Labeled>
+        <Labeled label="Message" hint="digest pre-filled with every lot and its verdict — edit before sending">
+          <Textarea className="min-h-[240px] font-mono text-xs" value={curBody} onChange={(e) => setBody((p) => ({ ...p, [grp.key]: e.target.value }))} />
+        </Labeled>
+        <label className="flex items-start gap-2 text-sm">
+          <input type="checkbox" className="mt-0.5" checked={attach} disabled={withReport.length === 0} onChange={(e) => setAttach(e.target.checked)} />
+          <span>
+            Attach all available reports ({withReport.length} PDF{withReport.length === 1 ? "" : "s"})
+            <span className="block text-[11px] text-muted-foreground">Each disclosure is logged on every lot the digest covered.</span>
+          </span>
+        </label>
+      </div>
+    </Dialog>
+  );
+}
+
+/** Resolve one inbound mail out of the manual-match queue. */
+export function MatchLabEmailModal({ orderId, email, onClose }: { orderId: string; email: LabEmail; onClose: () => void }) {
+  const b = useStore((s) => s.orders[orderId]);
+  const matchLabEmail = useStore((s) => s.matchLabEmail);
+  const [lot, setLot] = useState(b?.lots[0]?.id ?? "");
+  if (!b) return null;
+  const save = () => { if (!lot) return; matchLabEmail(orderId, email.id, lot); onClose(); };
+  return (
+    <Dialog open onClose={onClose} title="Match inbound email to a lot"
+      footer={<Footer onClose={onClose} onSave={save} saveLabel="Match" disabled={!lot} />}>
+      <div className="space-y-3">
+        <div className="rounded-lg border p-2.5">
+          <div className="text-sm font-medium">{email.subject}</div>
+          <div className="text-xs text-muted-foreground">{email.by} · {email.at}</div>
+          <p className="mt-1.5 whitespace-pre-wrap text-xs text-muted-foreground">{email.body}</p>
+        </div>
+        {email.matchNote && <p className="text-xs text-warn">{email.matchNote}</p>}
+        <Labeled label="Lot" hint="the mail's updates get applied to this lot's tracker">
+          <Select value={lot} onChange={(e) => setLot(e.target.value)}>
+            {b.lots.map((x) => <option key={x.id} value={x.id}>{x.lotCode} · {x.orderLineMpn} · WO {x.workOrderNo ?? "—"}</option>)}
+          </Select>
+        </Labeled>
       </div>
     </Dialog>
   );
@@ -143,14 +448,32 @@ export function AddPaymentModal({ orderId, onClose }: { orderId: string; onClose
   );
 }
 
-export function CreateShipmentModal({ orderId, onClose }: { orderId: string; onClose: () => void }) {
+export function CreateShipmentModal({
+  orderId, prefill, onClose,
+}: {
+  orderId: string;
+  /**
+   * Pre-fill from one or more tested lots: the goods sit at the lab, so origin defaults
+   * to it. Several lots of the same MPN are summed into one line.
+   */
+  prefill?: { lotCodes?: string[]; lines: { mpn: string; qty: number }[]; from?: string; leg?: ShipmentLeg };
+  onClose: () => void;
+}) {
   const b = useStore((s) => s.orders[orderId]);
   const createShipment = useStore((s) => s.createShipment);
-  const [leg, setLeg] = useState<ShipmentLeg>("INBOUND");
+  const [leg, setLeg] = useState<ShipmentLeg>(prefill?.leg ?? "INBOUND");
   const [carrier, setCarrier] = useState<string>("DHL");
-  const [from, setFrom] = useState(b?.supplier.name ?? "");
+  const [from, setFrom] = useState(prefill?.from ?? b?.supplier.name ?? "");
   const [to, setTo] = useState(fmtAddress(b?.hubAddress) || "1Buy hub");
-  const [qtys, setQtys] = useState<Record<string, number>>({});
+  const [qtys, setQtys] = useState<Record<string, number>>(() => {
+    if (!prefill || !b) return {};
+    const out: Record<string, number> = {};
+    for (const l of prefill.lines) {
+      const cap = remainingToShipLeg(b, l.mpn, prefill.leg ?? "INBOUND");
+      out[l.mpn] = Math.max(0, Math.min((out[l.mpn] ?? 0) + l.qty, cap));
+    }
+    return out;
+  });
   if (!b) return null;
   const lineRows = b.lines.map((l) => ({ mpn: l.mpn, remaining: remainingToShipLeg(b, l.mpn, leg) }));
   const anyQty = Object.values(qtys).some((q) => q > 0);
@@ -162,6 +485,14 @@ export function CreateShipmentModal({ orderId, onClose }: { orderId: string; onC
   return (
     <Dialog open onClose={onClose} title="Create shipment (AWB)" footer={<Footer onClose={onClose} onSave={save} saveLabel="Create shipment" disabled={!anyQty} />}>
       <div className="space-y-3">
+        {prefill && (
+          <div className="rounded-lg border border-primary/40 bg-accent-soft p-2.5 text-xs text-primary">
+            Pre-filled from {prefill.lotCodes?.length === 1 ? "tested lot" : `${prefill.lotCodes?.length ?? prefill.lines.length} tested lots`}
+            {prefill.lotCodes?.length ? <> <b>{prefill.lotCodes.join(", ")}</b></> : null}
+            {" · "}{prefill.lines.map((l) => `${l.mpn} ×${l.qty}`).join(" · ")}
+            {prefill.from ? <> · origin <b>{prefill.from}</b> (where the goods currently sit)</> : null}
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <Labeled label="Leg"><Select value={leg} onChange={(e) => {
             const lg = e.target.value as ShipmentLeg; setLeg(lg);

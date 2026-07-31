@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import type {
   Order, OrderBundle, OrderLine, ClientPO, SupplierPO, SupplierPoLine, PoTerms, Address, JourneyPhase, TestStatus, TestingMode, PaymentMode, PaymentDirection,
   PaymentStatus, ShipmentLeg, ShipmentStatus, TradeType, ApprovalState,
+  LotTest, MpnTestSpec, TestAuditEntry, TestProcessStatus, WhlReport, LabEmail, NotifyParty,
 } from "@/types";
 import { ORDERS, CLIENT_POS, SUPPLIER_POS, ONEBUY_HUB, getOrderBundle, buildJourney } from "@/data/fixtures";
 import { remainingToShipLeg, remainingToAllocate, escrowRemaining, gateReason, sourcedForClientLine, mappedForOrderLine, orderSourcedForClient, deliveredForClientLine } from "@/store/selectors";
@@ -12,10 +13,16 @@ import type { OrdersMap } from "@/store/selectors";
 // ---- mock external-API adapters (swap for real fetch() in production) ----
 import { fileBillOfEntry, getAssessment, getClearanceStatus } from "@/integrations/customs-icegate";
 import { bookShipment, getTracking, type Carrier } from "@/integrations/logistics";
-import { whlSubmitTestJob, whlPollTestReport, mapVerdict } from "@/integrations/lab-whl";
+import {
+  whlSubmitTestJob, whlPollTestReport, mapVerdict, whlFetchReport, whlSendMail, whlPollInbox,
+  conclusionToLotStatus, processToTestStatus,
+} from "@/integrations/lab-whl";
+import { extractPoTestRequirements } from "@/integrations/doc-extract";
+import { WHL_CONTACT, whlTemplate } from "@/data/enums";
 import { hkinOpenAccount, hkinFundSuperInvoice, hkinReleaseTranche, hkinRefund, hkinRequestExtension, buyerToken, sellerToken } from "@/integrations/escrow-hkin";
 import { bankInitiateTransfer, bankGetTransferStatus } from "@/integrations/banking";
 import { generateIrn } from "@/integrations/einvoice-irp";
+import { sendPartyNotification } from "@/integrations/notify";
 
 const SHARPBUY_GSTIN = "27AASCS1234A1Z5"; // masking entity's GSTIN — the only seller GSTIN sent to the IRP
 
@@ -25,6 +32,13 @@ let _n = 0;
 const uid = (p = "id") => `${p}-${Date.now().toString(36)}-${(_n++).toString(36)}`;
 const today = () => new Date().toISOString().slice(0, 10);
 const addDays = (iso: string, n: number) => { const d = new Date(iso); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
+const stamp = () => new Date().toISOString().slice(0, 16).replace("T", " "); // audit rows are datetime-precise
+
+// Every manual test edit and every status change (automated or manual) writes one of these.
+const auditRow = (a: Omit<TestAuditEntry, "id" | "at">): TestAuditEntry => ({ id: uid("aud"), at: stamp(), ...a });
+
+const ME = "You (demo)";
+const WHL_BOT = "WHL inbox (auto)";
 
 function freshSeed(): { orders: OrdersMap; clientPos: typeof CLIENT_POS; supplierPos: SupplierPO[] } {
   const orders: OrdersMap = {};
@@ -50,7 +64,7 @@ export interface SupplierPoInput {
 /** Standard bundle scaffold used by both create paths. */
 function scaffoldBundle(order: Order, lines: OrderLine[], createdEvent: string): OrderBundle {
   return {
-    ...order, lines, journey: buildJourney(order), lots: [],
+    ...order, lines, journey: buildJourney(order), lots: [], mpnTests: [], labEmails: [],
     escrow: order.paymentMode === "ESCROW"
       ? { id: uid("esc"), provider: "HKIN", externalRef: "—", currency: order.currency, materialAmount: order.buyTotal,
           chargesAmount: Math.round(order.buyTotal * 0.02), bankingCharges: Math.round(order.buyTotal * 0.005), feeSeller: 300, feeBuyer: 150,
@@ -79,6 +93,24 @@ interface Store {
   addLot: (orderId: string, lot: { orderLineMpn: string; lotCode: string; dateCode: string; qty: number; sampleQty: number; lab?: string }) => void;
   setLotStatus: (orderId: string, lotId: string, status: TestStatus) => void;
   fetchLabResult: (orderId: string, lotId: string) => void; // WHL adapter — poll the report
+
+  // ---- WHL testing platform ----
+  autofillMpnTests: (orderId: string, mpn?: string) => void;          // parse the PO's test table (never hand-typed)
+  addMpnTest: (orderId: string, mpn: string, t: { name: string; standard?: string }) => void;  // audited manual override
+  removeMpnTest: (orderId: string, mpn: string, testId: string) => void;                        // audited manual override
+  setLotTestStatus: (orderId: string, lotId: string, lotTestId: string, status: TestProcessStatus, note?: string) => void;
+  fetchWhlReport: (orderId: string, lotId: string) => void;           // pull (or revise) the report + parse it on screen
+  requestWhlUpdate: (orderId: string, lotId: string) => void;         // pre-mapped outbound chase
+  sendLabEmail: (orderId: string, m: { lotId?: string; subject: string; body: string }) => void;
+  syncWhlInbox: (orderId: string) => void;                            // inbound status mails → test statuses / reports
+  matchLabEmail: (orderId: string, emailId: string, lotId: string) => void; // resolve the manual-match queue
+  escalateLabEmail: (orderId: string, emailId: string) => void;
+  logReportAccess: (orderId: string, lotId: string, reportId: string, action: "VIEW" | "DOWNLOAD") => void;
+  reconcileReportPo: (orderId: string, lotId: string, reportId: string) => void;
+  // circulate a lot's result: supplier / buyer (masked from each other) / escrow / lab
+  notifyLotResult: (orderId: string, lotId: string, m: { party: NotifyParty; to: string; subject: string; body: string; attachReport: boolean }) => void;
+  // one digest mail covering many lots — logged against every lot it covered
+  notifyLotsResult: (orderId: string, lotIds: string[], m: { party: NotifyParty; to: string; subject: string; body: string; attachReports: boolean }) => void;
 
   addSourcingAllocation: (orderId: string, a: { orderLineId: string; orderLineMpn: string; clientPoNo: string; clientLineMpn: string; qty: number; marginPct: number }) => boolean;
 
@@ -116,7 +148,9 @@ function normalizeBundle(raw: unknown): OrderBundle {
     ...b,
     lines: b.lines ?? [],
     journey: b.journey ?? [],
-    lots: b.lots ?? [],
+    lots: (b.lots ?? []).map((l) => ({ ...l, tests: l.tests ?? [], reports: l.reports ?? [], notifications: l.notifications ?? [] })),
+    mpnTests: (b.mpnTests ?? []).map((s) => ({ ...s, tests: s.tests ?? [], audit: s.audit ?? [] })),
+    labEmails: b.labEmails ?? [],
     payments: b.payments ?? [],
     shipments: b.shipments ?? [],
     customs: b.customs ?? [],
@@ -305,7 +339,17 @@ export const useStore = create<Store>()(
         const lotId = uid("lot");
         set((s) => {
           const b = s.orders[orderId]; if (!b) return;
-          b.lots.push({ id: lotId, orderLineMpn: lot.orderLineMpn, lotCode: lot.lotCode, dateCode: lot.dateCode, qty: lot.qty, sampleQty: lot.sampleQty, testStatus: "PENDING", lab: lot.lab });
+          // lot logic is unchanged — it just inherits the MPN's PO-parsed test list as its status tracker
+          const spec = (b.mpnTests ?? []).find((x) => x.mpn === lot.orderLineMpn);
+          const tests: LotTest[] = (spec?.tests ?? []).map((t) => ({
+            id: uid("lt"), requirementId: t.id, name: t.name, standard: t.standard, source: t.source, status: "PENDING",
+            history: [auditRow({ by: ME, action: "STATUS", target: t.name, after: "PENDING", note: `Inherited from ${spec?.sourceDoc ?? "the PO"} when lot ${lot.lotCode} was raised.` })],
+          }));
+          const clientPoNo = b.sourcingAllocations.find((a) => a.orderLineMpn === lot.orderLineMpn)?.clientPoNo;
+          b.lots.push({
+            id: lotId, orderLineMpn: lot.orderLineMpn, lotCode: lot.lotCode, dateCode: lot.dateCode, qty: lot.qty,
+            sampleQty: lot.sampleQty, testStatus: "PENDING", lab: lot.lab, clientPoNo, tests, reports: [],
+          });
         });
         toast.message("Lot added — submitting to WHL…");
         // WHL adapter: register the test job, stamp the work-order no back onto the lot
@@ -338,6 +382,456 @@ export const useStore = create<Store>()(
             else if (st === "FAIL") toast.error(`WHL FAIL — report ${rep.reportNo}`);
             else toast(`WHL inconclusive — report ${rep.reportNo}`);
           } catch (e) { toast.error(`WHL: ${errMsg(e)}`); }
+        })();
+      },
+
+      // ---- WHL testing platform ----------------------------------------------------
+      // Test requirements already exist in the PO, so they're parsed from it rather than
+      // typed. An MPN whose table can't be read is flagged for manual review, never blank.
+      autofillMpnTests: (orderId, mpn) => {
+        const b0 = get().orders[orderId]; if (!b0) return;
+        const targets = (mpn ? b0.lines.filter((l) => l.mpn === mpn) : b0.lines).map((l) => l.mpn);
+        if (targets.length === 0) return;
+        const sourceDoc = b0.supplierPoNo ? `Supplier PO ${b0.supplierPoNo}` : `Order ${b0.orderNo}`;
+        const modes: Record<string, string> = {};
+        for (const l of b0.lines) modes[l.mpn] = l.testingMode;
+        toast.message(`Parsing test table off ${sourceDoc}…`);
+        void (async () => {
+          try {
+            const res = await extractPoTestRequirements({ sourceDoc, mpns: Array.from(new Set(targets)), testingModes: modes });
+            set((s) => {
+              const b = s.orders[orderId]; if (!b) return;
+              b.mpnTests ??= [];
+              for (const m of res.mpns) {
+                const failed = m.tests.length === 0 && !!m.note && !m.note.startsWith("PO specifies no");
+                const spec: MpnTestSpec = {
+                  id: uid("spec"), mpn: m.mpn,
+                  autofill: failed ? "FAILED" : "OK",
+                  autofillNote: m.note, sourceDoc: res.sourceDoc, parsedAt: stamp(), confidence: m.confidence,
+                  tests: m.tests.map((t) => ({ id: uid("req"), name: t.name, standard: t.standard, source: "AUTO_PO" as const })),
+                  audit: [],
+                };
+                const prev = b.mpnTests.find((x) => x.mpn === m.mpn);
+                // keep manual additions across a re-parse — they're human corrections, not PO data
+                const manual = prev?.tests.filter((t) => t.source === "MANUAL") ?? [];
+                spec.tests.push(...manual);
+                spec.audit = [
+                  ...(prev?.audit ?? []),
+                  auditRow({
+                    by: "Doc extraction (auto)", action: "AUTOFILL", target: m.mpn,
+                    before: prev ? `${prev.tests.length} test(s)` : "—",
+                    after: failed ? "auto-fill failed" : `${m.tests.length} test(s) from ${res.sourceDoc}`,
+                    note: m.note ?? `Confidence ${Math.round(m.confidence * 100)}%.`,
+                  }),
+                ];
+                if (prev) Object.assign(prev, spec, { id: prev.id }); else b.mpnTests.push(spec);
+                // push newly-parsed tests onto lots of this MPN that don't have them yet
+                for (const lot of b.lots.filter((l) => l.orderLineMpn === m.mpn)) {
+                  lot.tests ??= [];
+                  for (const t of spec.tests) {
+                    if (lot.tests.some((x) => x.name === t.name)) continue;
+                    lot.tests.push({ id: uid("lt"), requirementId: t.id, name: t.name, standard: t.standard, source: t.source, status: "PENDING",
+                      history: [auditRow({ by: "Doc extraction (auto)", action: "ADD", target: t.name, after: "PENDING", note: `Auto-filled from ${res.sourceDoc}.` })] });
+                  }
+                }
+              }
+            });
+            const bad = res.mpns.filter((m) => m.tests.length === 0 && m.note && !m.note.startsWith("PO specifies no")).length;
+            if (bad) toast.warning(`${bad} MPN(s) need manual review — auto-fill failed.`);
+            else toast.success("Test requirements auto-filled from the PO");
+          } catch (e) {
+            // whole-document failure: flag every target MPN rather than silently leaving them blank
+            set((s) => {
+              const b = s.orders[orderId]; if (!b) return;
+              b.mpnTests ??= [];
+              for (const m of Array.from(new Set(targets))) {
+                const prev = b.mpnTests.find((x) => x.mpn === m);
+                const row = auditRow({ by: "Doc extraction (auto)", action: "AUTOFILL", target: m, after: "auto-fill failed", note: errMsg(e) });
+                if (prev) { prev.autofill = "FAILED"; prev.autofillNote = errMsg(e); prev.audit.push(row); }
+                else b.mpnTests.push({ id: uid("spec"), mpn: m, autofill: "FAILED", autofillNote: errMsg(e), sourceDoc, parsedAt: stamp(), tests: [], audit: [row] });
+              }
+            });
+            toast.error(`Auto-fill failed — needs manual review (${errMsg(e)})`);
+          }
+        })();
+      },
+
+      addMpnTest: (orderId, mpn, t) => {
+        if (!t.name.trim()) return;
+        set((s) => {
+          const b = s.orders[orderId]; if (!b) return;
+          b.mpnTests ??= [];
+          let spec = b.mpnTests.find((x) => x.mpn === mpn);
+          if (!spec) { spec = { id: uid("spec"), mpn, autofill: "PENDING", tests: [], audit: [] }; b.mpnTests.push(spec); }
+          if (spec.tests.some((x) => x.name.toLowerCase() === t.name.trim().toLowerCase())) return;
+          const reqId = uid("req");
+          spec.tests.push({ id: reqId, name: t.name.trim(), standard: t.standard, source: "MANUAL", addedBy: ME, addedAt: stamp() });
+          spec.audit.push(auditRow({ by: ME, action: "ADD", target: t.name.trim(), before: "—", after: `manual test${t.standard ? ` (${t.standard})` : ""}`, note: "Manual override of the auto-filled list." }));
+          if (spec.autofill === "FAILED") spec.autofill = "PENDING"; // reviewed by a human now
+          for (const lot of b.lots.filter((l) => l.orderLineMpn === mpn)) {
+            lot.tests ??= [];
+            if (lot.tests.some((x) => x.name.toLowerCase() === t.name.trim().toLowerCase())) continue;
+            lot.tests.push({ id: uid("lt"), requirementId: reqId, name: t.name.trim(), standard: t.standard, source: "MANUAL", status: "PENDING",
+              history: [auditRow({ by: ME, action: "ADD", target: t.name.trim(), after: "PENDING", note: "Added manually to this lot's tracker." })] });
+          }
+        });
+        toast.success(`Test added — ${t.name}`);
+      },
+
+      removeMpnTest: (orderId, mpn, testId) => {
+        set((s) => {
+          const b = s.orders[orderId]; if (!b) return;
+          const spec = (b.mpnTests ?? []).find((x) => x.mpn === mpn); if (!spec) return;
+          const t = spec.tests.find((x) => x.id === testId); if (!t) return;
+          spec.tests = spec.tests.filter((x) => x.id !== testId);
+          spec.audit.push(auditRow({ by: ME, action: "DELETE", target: t.name, before: `${t.source === "AUTO_PO" ? "auto-filled" : "manual"} test`, after: "—", note: "Removed by operator." }));
+          for (const lot of b.lots.filter((l) => l.orderLineMpn === mpn)) {
+            const lt = (lot.tests ?? []).find((x) => x.name === t.name);
+            if (lt) lot.tests = (lot.tests ?? []).filter((x) => x.id !== lt.id);
+          }
+        });
+        toast.success("Test removed (logged)");
+      },
+
+      setLotTestStatus: (orderId, lotId, lotTestId, status, note) => {
+        set((s) => {
+          const lot = s.orders[orderId]?.lots.find((x) => x.id === lotId); if (!lot) return;
+          const t = (lot.tests ?? []).find((x) => x.id === lotTestId); if (!t) return;
+          const before = t.status;
+          if (before === status) return;
+          t.status = status; t.updatedAt = stamp();
+          t.history.push(auditRow({ by: ME, action: "STATUS", target: t.name, before, after: status, note: note ?? "Set manually." }));
+        });
+      },
+
+      // Pull the report for a lot's work order and parse it on screen. Called again → next revision.
+      fetchWhlReport: (orderId, lotId) => {
+        const b0 = get().orders[orderId]; if (!b0) return;
+        const lot = b0.lots.find((x) => x.id === lotId); if (!lot) return;
+        if (!lot.workOrderNo) { toast.error("No WHL work order for this lot yet."); return; }
+        const line = b0.lines.find((l) => l.mpn === lot.orderLineMpn);
+        const revision = (lot.reports ?? []).reduce((m, r) => Math.max(m, r.revision), 0) + 1;
+        toast.message(revision > 1 ? `Fetching revision ${revision} of ${lot.workOrderNo}…` : "Fetching WHL report…");
+        void (async () => {
+          try {
+            const rep = await whlFetchReport({
+              workOrderNo: lot.workOrderNo!, mpn: lot.orderLineMpn, manufacturer: line?.make ?? "—", lotQty: lot.qty,
+              client: b0.maskingEntity, clientPo: lot.clientPoNo, revision,
+              testNames: (lot.tests ?? []).map((t) => t.name),
+            });
+            set((s) => {
+              const b = s.orders[orderId]; if (!b) return;
+              const l = b.lots.find((x) => x.id === lotId); if (!l) return;
+              l.reports ??= [];
+              l.reports.forEach((r) => { r.current = false; });
+              const stored: WhlReport = {
+                id: uid("rep"), reportNo: rep.reportNo, revision: rep.revision, reportDate: rep.reportDate,
+                workOrderNo: rep.workOrderNo, fileName: rep.fileName, receivedAt: stamp(), current: true,
+                revisionNote: rep.revisionNote, partNumber: rep.partNumber, manufacturer: rep.manufacturer,
+                lotQty: rep.lotQty, client: rep.client, clientPo: rep.clientPo, conclusion: rep.conclusion,
+                anyFar: rep.anyFar, processes: rep.processes, approvedBy: rep.approvedBy, approverTitle: rep.approverTitle,
+                standards: rep.standards, riskClass: rep.riskClass, msl: rep.msl, packageType: rep.packageType,
+                confidentialityNote: rep.confidentialityNote, parseFlags: [...rep.parseFlags], accessLog: [],
+              };
+              // reconciliation: the report must agree with the lot it was raised for
+              if (rep.partNumber !== l.orderLineMpn) stored.parseFlags.push(`Report MPN ${rep.partNumber} ≠ lot MPN ${l.orderLineMpn} — verify before acting on this report.`);
+              if (l.clientPoNo && rep.clientPo !== "PO Unknown" && rep.clientPo !== l.clientPoNo) stored.parseFlags.push(`Report Client P/O ${rep.clientPo} ≠ ${l.clientPoNo} on file — reconcile.`);
+              l.reports.push(stored);
+              l.reportNo = stored.reportNo;
+              l.testedAt = stored.reportDate;
+              l.testStatus = conclusionToLotStatus(stored.conclusion, stored.anyFar);
+              // roll the process matrix onto the per-test tracker (with history)
+              l.tests ??= [];
+              for (const p of stored.processes) {
+                const next = processToTestStatus(p.result);
+                let t = l.tests.find((x) => x.name === p.name);
+                if (!t) {
+                  t = { id: uid("lt"), name: p.name, source: "AUTO_PO", status: "PENDING", history: [] };
+                  l.tests.push(t);
+                }
+                const before = t.status;
+                t.status = next; t.acceptQty = p.acceptQty; t.rejectQty = p.rejectQty; t.updatedAt = stamp();
+                t.history.push(auditRow({ by: WHL_BOT, action: "REPORT", target: p.name, before, after: next, note: `From report ${stored.reportNo}${p.note ? ` — ${p.note}` : ""}` }));
+              }
+              b.labEmails ??= [];
+              b.labEmails.unshift({
+                id: uid("em"), direction: "IN", lotId, lotCode: l.lotCode, mpn: l.orderLineMpn,
+                workOrderNo: l.workOrderNo, poNo: l.clientPoNo, subject: `WHL Report ${stored.reportNo} — ${l.orderLineMpn} (Lot ${l.lotCode})`,
+                body: `Report ${stored.reportNo} issued. Overall conclusion: ${stored.conclusion.replace(/_/g, " ")}${stored.anyFar ? " (one or more processes F.A.R.)" : ""}.`,
+                at: stamp(), by: "WHL Reports", status: "REPORT_DELIVERED", kind: "REPORT", attachments: [stored.fileName],
+              });
+              b.documents.push({ id: uid("doc"), subjectType: "LOT", docType: "WHL_REPORT", fileName: stored.fileName, uploadedBy: "WHL (email)", uploadedAt: today() });
+              // an unanswered chase is now answered
+              l.lastUpdateRequestAt = undefined;
+              const pending = b.labEmails.filter((m) => m.lotId === lotId && m.direction === "OUT" && m.status === "AWAITING_RESPONSE");
+              pending.forEach((m) => { m.status = "UPDATE_RECEIVED"; });
+            });
+            const st = conclusionToLotStatus(rep.conclusion, rep.anyFar);
+            if (st === "PASS") toast.success(`${rep.reportNo} — Acceptable`);
+            else if (st === "FAIL") toast.error(`${rep.reportNo} — ${rep.conclusion.replace(/_/g, " ").toLowerCase()}`);
+            else toast.warning(`${rep.reportNo} — Acceptable, but a process came back F.A.R.`);
+          } catch (e) { toast.error(`WHL: ${errMsg(e)}`); }
+        })();
+      },
+
+      // Pre-mapped chase — no looking up WHL's address or the work-order number by hand.
+      requestWhlUpdate: (orderId, lotId) => {
+        const b0 = get().orders[orderId]; if (!b0) return;
+        const lot = b0.lots.find((x) => x.id === lotId); if (!lot) return;
+        const tpl = whlTemplate("STATUS_REQUEST");
+        const ctx = {
+          entity: b0.maskingEntity, mpn: lot.orderLineMpn, lotCode: lot.lotCode, qty: lot.qty, sampleQty: lot.sampleQty,
+          workOrderNo: lot.workOrderNo, clientPoNo: lot.clientPoNo, reportNo: lot.reportNo, lab: lot.lab, dateCode: lot.dateCode,
+        };
+        get().sendLabEmail(orderId, { lotId, subject: tpl.subject(ctx), body: tpl.body(ctx) });
+        set((s) => { const l = s.orders[orderId]?.lots.find((x) => x.id === lotId); if (l) l.lastUpdateRequestAt = today(); });
+      },
+
+      sendLabEmail: (orderId, m) => {
+        const b0 = get().orders[orderId]; if (!b0) return;
+        const lot = m.lotId ? b0.lots.find((x) => x.id === m.lotId) : undefined;
+        const emId = uid("em");
+        set((s) => {
+          const b = s.orders[orderId]; if (!b) return;
+          b.labEmails ??= [];
+          b.labEmails.unshift({
+            id: emId, direction: "OUT", lotId: m.lotId, lotCode: lot?.lotCode, mpn: lot?.orderLineMpn,
+            workOrderNo: lot?.workOrderNo, poNo: lot?.clientPoNo, subject: m.subject, body: m.body,
+            at: stamp(), by: ME, status: "AWAITING_RESPONSE", kind: m.subject.startsWith("Status request") ? "REQUEST_UPDATE" : "CUSTOM",
+          });
+        });
+        toast.message(`Sending to ${WHL_CONTACT}…`);
+        void (async () => {
+          try {
+            await whlSendMail({ to: WHL_CONTACT, subject: m.subject, body: m.body, workOrderNo: lot?.workOrderNo, lotCode: lot?.lotCode, mpn: lot?.orderLineMpn, poNo: lot?.clientPoNo });
+            toast.success("Email sent to WHL — logged against the lot");
+          } catch (e) {
+            set((s) => { const em = s.orders[orderId]?.labEmails?.find((x) => x.id === emId); if (em) { em.status = "ESCALATED"; em.matchNote = `Send failed — ${errMsg(e)}. Retry.`; } });
+            toast.error(`Mail: ${errMsg(e)}`);
+          }
+        })();
+      },
+
+      // Inbound mail drives the tracker. Mails that can't be matched go to a manual-match queue.
+      syncWhlInbox: (orderId) => {
+        const b0 = get().orders[orderId]; if (!b0) return;
+        const wos = b0.lots.filter((l) => !!l.workOrderNo).map((l) => ({
+          workOrderNo: l.workOrderNo!, lotCode: l.lotCode, mpn: l.orderLineMpn, testNames: (l.tests ?? []).map((t) => t.name),
+        }));
+        if (wos.length === 0) { toast.error("No WHL work orders on this order yet."); return; }
+        toast.message("Checking the WHL mailbox…");
+        void (async () => {
+          try {
+            const res = await whlPollInbox({ workOrders: wos });
+            let matched = 0, unmatched = 0;
+            set((s) => {
+              const b = s.orders[orderId]; if (!b) return;
+              b.labEmails ??= [];
+              for (const msg of res.messages) {
+                const lot = msg.lotCode ? b.lots.find((l) => l.lotCode === msg.lotCode)
+                  : msg.workOrderNo ? b.lots.find((l) => l.workOrderNo === msg.workOrderNo) : undefined;
+                const em: LabEmail = {
+                  id: uid("em"), direction: "IN", lotId: lot?.id, lotCode: lot?.lotCode, mpn: lot?.orderLineMpn,
+                  workOrderNo: msg.workOrderNo, poNo: lot?.clientPoNo, subject: msg.subject, body: msg.body,
+                  at: msg.receivedAt, by: "WHL Reports",
+                  status: !lot ? "AWAITING_RESPONSE" : msg.kind === "REPORT" ? "REPORT_DELIVERED" : "UPDATE_RECEIVED",
+                  kind: msg.kind === "REPORT" ? "REPORT" : "STATUS_UPDATE", attachments: msg.attachments,
+                  matchNote: lot ? undefined : "Subject line carries no work order, lot or report number — match it manually.",
+                };
+                b.labEmails.unshift(em);
+                if (!lot) { unmatched++; continue; }
+                matched++;
+                // refresh the per-test tracker from the mail's interim statuses
+                for (const u of msg.testUpdates ?? []) {
+                  lot.tests ??= [];
+                  let t = lot.tests.find((x) => x.name === u.name);
+                  if (!t) { t = { id: uid("lt"), name: u.name, source: "AUTO_PO", status: "PENDING", history: [] }; lot.tests.push(t); }
+                  const before = t.status;
+                  if (before === "PASSED" || before === "FAILED") continue; // a report already settled this test
+                  t.status = u.status; t.updatedAt = msg.receivedAt;
+                  t.history.push(auditRow({ by: WHL_BOT, action: "STATUS", target: u.name, before, after: u.status, note: u.note ?? msg.subject, sourceEmailId: em.id }));
+                }
+                if (msg.kind === "REPORT") lot.lastUpdateRequestAt = undefined;
+                b.labEmails.filter((x) => x.lotId === lot.id && x.direction === "OUT" && x.status === "AWAITING_RESPONSE")
+                  .forEach((x) => { x.status = "UPDATE_RECEIVED"; });
+              }
+            });
+            toast.success(`${matched} update(s) applied${unmatched ? ` · ${unmatched} need manual matching` : ""}`);
+          } catch (e) { toast.error(`WHL inbox: ${errMsg(e)}`); }
+        })();
+      },
+
+      matchLabEmail: (orderId, emailId, lotId) => {
+        set((s) => {
+          const b = s.orders[orderId]; if (!b) return;
+          const em = b.labEmails?.find((x) => x.id === emailId); if (!em) return;
+          const lot = b.lots.find((l) => l.id === lotId); if (!lot) return;
+          em.lotId = lot.id; em.lotCode = lot.lotCode; em.mpn = lot.orderLineMpn;
+          em.workOrderNo = em.workOrderNo ?? lot.workOrderNo; em.poNo = lot.clientPoNo;
+          em.matchedBy = ME; em.matchNote = undefined;
+          em.status = em.kind === "REPORT" ? "REPORT_DELIVERED" : "UPDATE_RECEIVED";
+          const spec = (b.mpnTests ?? []).find((x) => x.mpn === lot.orderLineMpn);
+          spec?.audit.push(auditRow({ by: ME, action: "EMAIL", target: lot.lotCode, after: "matched inbound mail", note: em.subject, sourceEmailId: em.id }));
+        });
+        toast.success("Email matched to the lot");
+      },
+
+      escalateLabEmail: (orderId, emailId) => {
+        set((s) => { const em = s.orders[orderId]?.labEmails?.find((x) => x.id === emailId); if (em) em.status = "ESCALATED"; });
+        toast.warning("Thread marked escalated");
+      },
+
+      // Reports carry NDA language — every view/download is logged, internal-only.
+      logReportAccess: (orderId, lotId, reportId, action) => {
+        set((s) => {
+          const r = s.orders[orderId]?.lots.find((x) => x.id === lotId)?.reports?.find((x) => x.id === reportId);
+          if (r) r.accessLog.unshift({ at: stamp(), by: ME, action });
+        });
+      },
+
+      reconcileReportPo: (orderId, lotId, reportId) => {
+        set((s) => {
+          const b = s.orders[orderId]; if (!b) return;
+          const lot = b.lots.find((x) => x.id === lotId); if (!lot) return;
+          const r = lot.reports?.find((x) => x.id === reportId); if (!r) return;
+          const before = r.clientPo;
+          const onFile = lot.clientPoNo ?? b.sourcingAllocations.find((a) => a.orderLineMpn === lot.orderLineMpn)?.clientPoNo;
+          if (!onFile) { toast.error("No client PO on file for this lot — map it on the Allocations tab first."); return; }
+          r.clientPo = onFile;
+          r.parseFlags = r.parseFlags.filter((f) => !f.toLowerCase().includes("client p/o"));
+          const spec = (b.mpnTests ?? []).find((x) => x.mpn === lot.orderLineMpn);
+          spec?.audit.push(auditRow({ by: ME, action: "RECONCILE", target: r.reportNo, before, after: onFile, note: "Report Client P/O reconciled against the PO on file." }));
+        });
+        toast.success("Client P/O reconciled");
+      },
+
+      // "Result is in — who do we tell." One action per counterparty; the report PDF rides
+      // along when the operator ticks it. Escrow notifications also land on the escrow ledger.
+      notifyLotResult: (orderId, lotId, m) => {
+        const b0 = get().orders[orderId]; if (!b0) return;
+        const lot = b0.lots.find((x) => x.id === lotId); if (!lot) return;
+        const rep = (lot.reports ?? []).find((r) => r.current) ?? (lot.reports ?? [])[0];
+        const attachments = m.attachReport && rep ? [rep.fileName] : [];
+        const noteFor: Record<NotifyParty, string> = {
+          SUPPLIER: "Masked — buyer identity, client PO and sell price withheld.",
+          BUYER: "Masked — supplier identity, buy price and inbound AWB withheld.",
+          ESCROW: "Release-trigger evidence for the escrow provider.",
+          WHL: "Acknowledgement to the laboratory.",
+        };
+        const nId = uid("ntf");
+        set((s) => {
+          const l = s.orders[orderId]?.lots.find((x) => x.id === lotId); if (!l) return;
+          (l.notifications ??= []).unshift({
+            id: nId, party: m.party, to: m.to, subject: m.subject, body: m.body, attachments,
+            reportNo: rep?.reportNo, at: stamp(), by: ME, status: "SENT",
+            note: attachments.length ? `${noteFor[m.party]} Report shared under NDA — internal use by the recipient only.` : noteFor[m.party],
+          });
+        });
+        toast.message(`Notifying ${m.party.toLowerCase()}…`);
+        void (async () => {
+          try {
+            const res = await sendPartyNotification({
+              party: m.party, to: m.to, subject: m.subject, body: m.body, attachments,
+              orderNo: b0.orderNo, lotCode: lot.lotCode, reportNo: rep?.reportNo,
+            });
+            set((s) => {
+              const bb = s.orders[orderId]; if (!bb) return;
+              bb.events.unshift({
+                id: uid("ev"), eventType: "GENERAL",
+                message: `${lot.lotCode} (${lot.orderLineMpn}) result ${rep ? `${rep.reportNo} — ${rep.conclusion.replace(/_/g, " ").toLowerCase()}` : ""} notified to ${m.party.toLowerCase()} (${res.to})${attachments.length ? " with the report attached" : ""}.`,
+                source: "NOTIFY", occurredAt: today(), recordedBy: ME,
+              });
+              // escrow gets a ledger marker so the release decision has a paper trail
+              if (m.party === "ESCROW" && bb.escrow) {
+                bb.escrow.events.push({
+                  id: uid("ee"), type: "HOLD", amount: 0,
+                  trigger: `Lab result shared with HKIN — ${lot.lotCode}${rep ? ` (${rep.reportNo}, ${rep.conclusion.replace(/_/g, " ").toLowerCase()})` : ""}`,
+                  occurredAt: today(),
+                });
+              }
+              // the lab acknowledgement belongs on the WHL thread as well
+              if (m.party === "WHL") {
+                (bb.labEmails ??= []).unshift({
+                  id: uid("em"), direction: "OUT", lotId, lotCode: lot.lotCode, mpn: lot.orderLineMpn,
+                  workOrderNo: lot.workOrderNo, poNo: lot.clientPoNo, subject: m.subject, body: m.body,
+                  at: stamp(), by: ME, status: "SENT", kind: "CUSTOM",
+                });
+              }
+            });
+            toast.success(`${m.party[0]}${m.party.slice(1).toLowerCase()} notified (${res.messageId})`);
+          } catch (e) {
+            set((s) => {
+              const n = s.orders[orderId]?.lots.find((x) => x.id === lotId)?.notifications?.find((x) => x.id === nId);
+              if (n) { n.status = "FAILED"; n.note = `Send failed — ${errMsg(e)}. Retry.`; }
+            });
+            toast.error(`Notify: ${errMsg(e)}`);
+          }
+        })();
+      },
+
+      // Bulk sibling of notifyLotResult: ONE mail for many lots. The notification row is
+      // written onto every lot it covered, so each lot's trail still shows who was told.
+      notifyLotsResult: (orderId, lotIds, m) => {
+        const b0 = get().orders[orderId]; if (!b0) return;
+        const lots = b0.lots.filter((l) => lotIds.includes(l.id));
+        if (lots.length === 0) { toast.error("No lots selected."); return; }
+        const reportOf = (l: (typeof lots)[number]) => (l.reports ?? []).find((r) => r.current) ?? (l.reports ?? [])[0];
+        const attachments = m.attachReports
+          ? Array.from(new Set(lots.map((l) => reportOf(l)?.fileName).filter((f): f is string => !!f)))
+          : [];
+        const coverage = `Sent as one digest covering ${lots.length} lot(s): ${lots.map((l) => l.lotCode).join(", ")}.`;
+        const nIds = lots.map((l) => ({ lotId: l.id, id: uid("ntf") }));
+        set((s) => {
+          const bb = s.orders[orderId]; if (!bb) return;
+          for (const { lotId, id: nId } of nIds) {
+            const l = bb.lots.find((x) => x.id === lotId); if (!l) continue;
+            (l.notifications ??= []).unshift({
+              id: nId, party: m.party, to: m.to, subject: m.subject, body: m.body, attachments,
+              reportNo: reportOf(l)?.reportNo, at: stamp(), by: ME, status: "SENT",
+              note: `${coverage}${attachments.length ? " Report(s) shared under NDA — internal use by the recipient only." : ""}`,
+            });
+          }
+        });
+        toast.message(`Notifying ${m.party.toLowerCase()} about ${lots.length} lot(s)…`);
+        void (async () => {
+          try {
+            const res = await sendPartyNotification({
+              party: m.party, to: m.to, subject: m.subject, body: m.body, attachments,
+              orderNo: b0.orderNo, lotCode: lots.map((l) => l.lotCode).join(","),
+            });
+            set((s) => {
+              const bb = s.orders[orderId]; if (!bb) return;
+              bb.events.unshift({
+                id: uid("ev"), eventType: "GENERAL",
+                message: `${lots.length} lot(s) (${lots.map((l) => l.lotCode).join(", ")}) notified to ${m.party.toLowerCase()} (${res.to}) in one digest${attachments.length ? ` with ${attachments.length} report(s) attached` : ""}.`,
+                source: "NOTIFY", occurredAt: today(), recordedBy: ME,
+              });
+              if (m.party === "ESCROW" && bb.escrow) {
+                bb.escrow.events.push({
+                  id: uid("ee"), type: "HOLD", amount: 0,
+                  trigger: `Lab results shared with HKIN — ${lots.length} lot(s): ${lots.map((l) => `${l.lotCode}${reportOf(l) ? ` (${reportOf(l)!.reportNo})` : ""}`).join(", ")}`,
+                  occurredAt: today(),
+                });
+              }
+              if (m.party === "WHL") {
+                (bb.labEmails ??= []).unshift({
+                  id: uid("em"), direction: "OUT", subject: m.subject, body: m.body,
+                  lotId: lots[0].id, lotCode: lots.map((l) => l.lotCode).join(", "), mpn: lots[0].orderLineMpn,
+                  at: stamp(), by: ME, status: "SENT", kind: "CUSTOM",
+                });
+              }
+            });
+            toast.success(`${lots.length} lot(s) notified to ${m.party.toLowerCase()} (${res.messageId})`);
+          } catch (e) {
+            set((s) => {
+              const bb = s.orders[orderId]; if (!bb) return;
+              for (const { lotId, id: nId } of nIds) {
+                const n = bb.lots.find((x) => x.id === lotId)?.notifications?.find((x) => x.id === nId);
+                if (n) { n.status = "FAILED"; n.note = `Send failed — ${errMsg(e)}. Retry.`; }
+              }
+            });
+            toast.error(`Notify: ${errMsg(e)}`);
+          }
         })();
       },
 
@@ -665,7 +1159,9 @@ export const useStore = create<Store>()(
     })),
     {
       name: "poc-sourceops",
-      version: 2, // bumped for the 3-entity (Client PO / Supplier PO / Order) model
+      version: 4, // 2 = 3-entity model · 3 = WHL testing · 4 = full hardcoded seed on every order
+      // older blobs have no testing/demo data — drop them so the seeded demo shows up as-is
+      migrate: (persisted, from) => (from < 4 ? undefined : persisted) as never,
       storage: createJSONStorage(() => (typeof window !== "undefined" ? window.localStorage : (undefined as unknown as Storage))),
       skipHydration: true,
       merge: (persisted, current) => {

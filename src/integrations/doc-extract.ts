@@ -1,4 +1,5 @@
 import { mockCall } from "@/integrations/mock-client";
+import { WHL_PROCESSES } from "@/data/enums";
 
 const SYS = "doc-extract";
 const LABEL = "Doc Extraction";
@@ -24,6 +25,47 @@ export function extractClientPo(req: { fileName: string; bytesLen: number }) {
       overallConfidence: 0.94,
     }),
     { latencyMs: [800, 2500], failError: { code: "UNPARSEABLE_FILE", message: "Could not parse document — enter manually", status: 422 } });
+}
+
+// ---- test requirements off a PO (the source of truth for "which tests does this MPN need") ----
+
+export interface ExtractedMpnTests {
+  mpn: string;
+  tests: { name: string; standard?: string }[];
+  confidence: number;
+  note?: string; // set when the test table for this MPN couldn't be read
+}
+export interface ExtractPoTestsRes { sourceDoc: string; mpns: ExtractedMpnTests[]; overallConfidence: number }
+
+/**
+ * Parse the test table off a Client/Supplier PO. Tests are NEVER hand-typed by the
+ * operator — they already exist in the PO, so they're auto-filled from here.
+ * An MPN whose table can't be read comes back with an empty `tests` + a `note`;
+ * the caller flags it "Auto-fill failed — needs manual review" instead of leaving it blank.
+ */
+export function extractPoTestRequirements(req: { sourceDoc: string; mpns: string[]; testingModes?: Record<string, string> }) {
+  return mockCall<ExtractPoTestsRes>(SYS, LABEL, "POST /extract/po-test-requirements", req,
+    () => {
+      const mpns: ExtractedMpnTests[] = req.mpns.map((mpn, i) => {
+        const mode = req.testingModes?.[mpn];
+        if (mode === "NONE") return { mpn, tests: [], confidence: 0.99, note: "PO specifies no incoming test for this MPN." };
+        // a self-test line carries a shorter table; a WHL line carries the full AS6081 screen
+        const plan = mode === "SUPPLIER_SELF"
+          ? ["Documentation & Packaging Inspection", "General Inspection", "Electrical Test"]
+          : [...WHL_PROCESSES].slice(0, 6);
+        // deterministic-ish "bad scan" on the second MPN of a PO — exercises the manual-review path
+        if (i === 1 && Math.random() < 0.45) {
+          return { mpn, tests: [], confidence: 0.31, note: "Test table on page 2 is a low-resolution scan — columns could not be resolved." };
+        }
+        return {
+          mpn,
+          tests: plan.map((name) => ({ name, standard: mode === "WHL" ? "AS6081" : undefined })),
+          confidence: 0.9 + Math.random() * 0.09,
+        };
+      });
+      return { sourceDoc: req.sourceDoc, mpns, overallConfidence: 0.93 };
+    },
+    { latencyMs: [700, 2000], failError: { code: "UNPARSEABLE_FILE", message: "Could not parse the PO test table — needs manual review", status: 422 } });
 }
 
 export interface ExtractedSupplierLine { mpn: string; make: string; qty: number; buy: number; margin: number; confidence: number; }

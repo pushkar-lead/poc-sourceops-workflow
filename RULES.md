@@ -195,108 +195,84 @@ useEffect(() => {
 
 ---
 
-## Form Patterns (React Hook Form + Zod)
+## Form Patterns (plain controlled state — no form library)
+
+This project has no `react-hook-form`/Zod/any form library. Forms are plain `useState` + manual validation, matching the rest of the hand-rolled convention.
 
 ```ts
-// ✅ DO: Zod schema + form hook
-import { useForm } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
-
-const schema = z.object({
-  supplier: z.string().min(1, 'Supplier required'),
-  poNo: z.string().min(1, 'PO# required'),
-  lines: z.array(z.object({
-    mpn: z.string(),
-    qty: z.number().positive(),
-  })),
-});
-
+// ✅ DO: controlled state + inline validation before calling the store action
 export function CreateSupplierPoForm() {
-  const form = useForm<z.infer<typeof schema>>({
-    resolver: zodResolver(schema),
-  });
-  return (
-    <form onSubmit={form.handleSubmit((data) => {
-      useStore.getState().createSupplierPo(data);
-    })}>
-      {/* form fields */}
-    </form>
-  );
+  const [supplier, setSupplier] = useState('');
+  const [poNo, setPoNo] = useState('');
+  const [lines, setLines] = useState<{ mpn: string; qty: number }[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!supplier.trim()) return setError('Supplier required');
+    if (!poNo.trim()) return setError('PO# required');
+    useStore.getState().createSupplierPo({ supplier, poNo, lines });
+  }
+  return <form onSubmit={handleSubmit}>{/* form fields, use Select for supplier — see below */}</form>;
 }
 
-// ❌ DON'T: Manual validation
-const [errors, setErrors] = useState({});
+// ✅ DO: dropdown from the directory for any buyer/supplier name field — never free text
+import { SUPPLIERS } from '@/data/directory';
+<select value={supplierId} onChange={(e) => setSupplierId(e.target.value)}>
+  {SUPPLIERS.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+</select>
 ```
 
 ---
 
 ## Data Table Patterns
 
-```ts
-// ✅ DO: TanStack React Table with useDataTable hook
-import { useDataTable } from '@/hooks/use-data-table';
+There is no TanStack Table. Use the hand-rolled `DataTable` in `src/components/ui/primitives.tsx`.
 
-export function OrdersList({ orders }: Props) {
-  const { table } = useDataTable({
-    data: orders,
-    columns,
-    manualPagination: true,
-    pageCount: Math.ceil(orders.length / pageSize),
-  });
-  return (
-    <div>
-      <Table>
-        <TableHeader>
-          {table.getHeaderGroups().map(hg => (...))}
-        </TableHeader>
-        <TableBody>
-          {table.getRowModel().rows.map(row => (...))}
-        </TableBody>
-      </Table>
-      <PaginationControls table={table} />
-    </div>
-  );
+```ts
+// ✅ DO: hand-rolled DataTable + Col<T> definitions
+import { DataTable, type Col } from '@/components/ui/primitives';
+
+const cols: Col<Order>[] = [
+  { key: 'orderNo', header: 'Order #', render: (o) => <span className="font-mono">{o.orderNo}</span> },
+  { key: 'status', header: 'Status', render: (o) => <StatusPill status={o.status} /> },
+];
+
+export function OrdersList({ orders }: { orders: Order[] }) {
+  return <DataTable columns={cols} rows={orders} empty="No orders yet." />;
 }
 
-// ❌ DON'T: Manual map() over data with index
-orders.map((order, idx) => (
-  <TableRow key={idx}> {/* bad: keys should be stable IDs */}
-    ...
-  </TableRow>
-))
+// ❌ DON'T: map() with index as key
+orders.map((order, idx) => <div key={idx}>...</div>) // bad: keys should be stable IDs (order.id)
 ```
 
 ---
 
 ## Modal & Sheet Patterns
 
-```ts
-// ✅ DO: Controlled open state via store or prop
-interface FundEscrowModalProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  orderId: string;
-}
+Modals are hand-rolled (`Dialog` in `src/components/ui/primitives.tsx` — NOT Radix, no `DialogContent`/`onOpenChange`). The **parent** owns visibility by conditionally rendering the modal at all (a `modal: ModalKey | null` state + `{modal === "fund" && <FundEscrowModal onClose={close} />}`); the modal itself takes `onClose` and calls it after a successful save.
 
-export function FundEscrowModal({ open, onOpenChange, orderId }: Props) {
+```ts
+// ✅ DO: parent conditionally mounts, modal just takes onClose
+type ModalKey = null | "fund" | "addLot" /* ... */;
+const [modal, setModal] = useState<ModalKey>(null);
+const close = () => setModal(null);
+// ...
+{modal === "fund" && <FundEscrowModal orderId={id} onClose={close} />}
+
+export function FundEscrowModal({ orderId, onClose }: { orderId: string; onClose: () => void }) {
+  const [amount, setAmount] = useState(0);
+  const save = () => { useStore.getState().sendEscrowEmail(orderId, "PAYMENT_INSTRUCTION_TO_FINANCE", draft); onClose(); };
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <form onSubmit={(e) => {
-          e.preventDefault();
-          useStore.getState().fundEscrow(orderId, amount, banking);
-          onOpenChange(false); // close after success
-        }}>
-          {/* fields */}
-        </form>
-      </DialogContent>
+    <Dialog open onClose={onClose} title="Fund escrow" footer={<Footer onClose={onClose} onSave={save} saveLabel="Send" />}>
+      {/* fields */}
     </Dialog>
   );
 }
 
-// ❌ DON'T: Internal open state (hard to coordinate)
+// ❌ DON'T: modal owning its own open/visible state — the parent must control mount/unmount
 export function FundEscrowModal({ orderId }: Props) {
-  const [open, setOpen] = useState(false); // uncoordinated
+  const [open, setOpen] = useState(false); // uncoordinated with the button that should open it
 }
 ```
 
@@ -336,41 +312,23 @@ import { cn } from '@/lib/utils';
 
 ## Integration Patterns (Mock APIs)
 
+The call log is its own store — `src/store/integration-log-store.ts` (`useIntegrationLog`) — separate from the main app store. Every adapter routes through `mockCall()` (`src/integrations/mock-client.ts`), which logs begin/end itself; **never log a call manually** from a component or store action.
+
 ```ts
-// ✅ DO: Use mockCall wrapper for latency + chaos
+// ✅ DO: route every adapter call through mockCall — it logs to useIntegrationLog itself
 import { mockCall } from '@/integrations/mock-client';
 
-export async function hkinFund(
-  orderId: string,
-  amount: number,
-  banking: number
-): Promise<EscrowAccount> {
-  return mockCall('HKIN fund', 1200, () => ({
-    escrowRef: `ESC-${orderId}`,
-    status: "FUNDED",
-    materialAmount: amount,
-    chargesAmount: amount * 0.02,
-    bankingCharges: banking,
-    superInvoiceTotal: amount + (amount * 0.02) + banking + 450,
-    expiryDate: addDays(new Date(), 45),
-  }));
+export async function escrowAgentFetchInvoice(req: { orderRef: string; invoiceNo: string; /* ... */ }) {
+  return mockCall(
+    'ESCROW_AGENT', 'Escrow Agent', 'fetchInvoice', req,
+    () => ({ invoice: { /* ... */ }, email: { /* ... */ } }),
+    { latencyMs: [800, 2000], failRate: 0.05 },
+  );
 }
 
-// ✅ DO: Log to integration log after call
-set((s) => {
-  s.integrationLog.push({
-    timestamp: new Date(),
-    endpoint: 'HKIN fund',
-    requestPayload: { orderId, amount, banking },
-    responsePayload: result,
-    latencyMs: 1200,
-    status: 'SUCCESS',
-  });
-});
-
-// ❌ DON'T: Hard-code latency values in components
-// (use integrations layer)
-await new Promise(r => setTimeout(r, 1000));
+// ❌ DON'T: hand-roll latency/logging in a component or store action
+await new Promise(r => setTimeout(r, 1000)); // bypasses the call log and the chaos toggle
+set((s) => { s.someLog.push({ timestamp: new Date(), ... }); }); // there is no manual log array to push to
 ```
 
 ---

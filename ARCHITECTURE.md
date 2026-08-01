@@ -6,35 +6,39 @@ System design, data flows, and subsystem integration for poc-sourceops-workflow.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    React 18 + Next.js 16                    │
-│                  (App Router, Server Components)            │
+│                     React 19 + Next.js 16                   │
+│                       (App Router)                          │
 ├─────────────────────────────────────────────────────────────┤
 │                     Zustand v5 Store                        │
-│  (localStorage-persisted state: POs, Orders, Integrations)  │
+│   (localStorage-persisted, single store: fulfilment +       │
+│    escrow + testing + RFQ actions, immer middleware)         │
 ├─────────────────────────────────────────────────────────────┤
-│  TanStack React Query v5  │  TanStack React Table v8        │
-│  (mock data fetching)     │  (data grid rendering)          │
+│         Hand-rolled UI primitives (no component library)    │
+│   Panel · Button · DataTable · Pill · StatusPill · forms    │
 ├─────────────────────────────────────────────────────────────┤
 │               Mock Integration Layer                         │
-│  HKIN · ICEGATE · WHL · Logistics · Banking · E-Invoice     │
-│  (latency-injected, chaos toggle, call logging)             │
+│  Escrow Agent · ICEGATE · WHL · Logistics · Banking ·       │
+│  E-Invoice · RFQ/Quote mail  (latency-injected, chaos        │
+│  toggle, call logging)                                       │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+No React Query, no TanStack Table, no Radix/shadcn — all data fetching is mocked directly in Zustand actions, and all tables/grids are the hand-rolled `DataTable` in `src/components/ui/primitives.tsx`.
 
 ## Data Flow
 
 ```
 User Input (forms/modals)
   ↓
-Zustand Actions (createClientPo, fundEscrow, etc.)
+Zustand Actions (createClientPo, sendEscrowEmail, createRfqBundle, etc.)
   ↓
-State Mutation (immer) + localStorage sync
+State Mutation (immer) + localStorage sync (persist, skipHydration + StoreHydrator)
   ↓
 Components re-render (React hooks)
   ↓
-Selectors compute derived state (escrowRemaining, gateReason, etc.)
+Selectors compute derived state (gateReason, escrowReleaseReadiness, demandRemaining, etc.)
   ↓
-Integration Side-effects (async: HKIN fund, ICEGATE file, etc.)
+Integration Side-effects (async: Escrow Agent fetch, ICEGATE file, RFQ send, etc.)
   ↓
 Integration results logged to call log
   ↓
@@ -403,21 +407,20 @@ app/layout.tsx (root, providers)
   ├── QueryClientProvider
   ├── ThemeProvider
   ├── ErrorBoundary
-  └── app/(auth)/ or app/fulfilment/(dashboard)/
-      ├── Header
-      ├── AppSidebar
-      └── Page (orders/, client-pos/, etc.)
+  └── app/fulfilment/ (internal, sidebar chrome) or app/portal/ (public, bare layout)
+      ├── Header + AppSidebar (fulfilment only — driven by NAV_GROUPS in data/enums.ts)
+      └── Page (orders/, client-pos/, rfq-bundles/, etc.)
           └── Workspace / Listing / Board
-              └── Modals (fund-escrow, allocate-delivery, etc.)
-              └── Tabs (overview, testing, escrow, etc.)
-              └── DataTables (with useDataTable hook)
+              └── Modals (fund-escrow, allocate-delivery, compose-escrow-email, etc.)
+              └── Tabs (overview, testing, escrow, etc. — order-workspace.tsx)
+              └── DataTable (hand-rolled, src/components/ui/primitives.tsx)
 ```
 
 ## Performance Considerations
 
-- **Selectors:** Pure functions, memoized by Zustand (only recompute when state changes)
-- **DataTables:** TanStack React Table with virtualization for large datasets
-- **Modals:** Lazy-loaded (Dialog only renders when open)
+- **Selectors:** Pure functions, no built-in memoization — recomputed on every read; fine at this data scale
+- **DataTables:** Hand-rolled `DataTable` component, no virtualization (POC data volumes don't need it)
+- **Modals:** Rendered conditionally by parent state (not a portal/lazy-load library)
 - **Integrations:** Fire-and-forget with call logging; no blocking waits
 - **localStorage:** ~5MB limit (POC uses <1MB); no issue with seed data
 

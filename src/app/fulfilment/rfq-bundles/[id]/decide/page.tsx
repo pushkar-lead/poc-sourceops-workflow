@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter, useParams } from "next/navigation";
+import { toast } from "sonner";
 import { useStore } from "@/store/store";
 import { quotesForLine, calculateLineMargin, bestQuotePerLine } from "@/store/selectors";
 import { PageHeader, Panel, Button, StatusPill } from "@/components/ui/primitives";
@@ -36,7 +37,7 @@ export default function DecideQuotePage() {
 
   const handleSubmitDecision = () => {
     if (selectedQuoteLineIds.length === 0) {
-      alert("Select at least one quote line");
+      toast.error("Select at least one quote line");
       return;
     }
     const decisionId = store.createClientQuoteDecision({
@@ -45,8 +46,7 @@ export default function DecideQuotePage() {
       markupPercent: markup,
     });
     if (decisionId) {
-      const approvalId = store.submitQuoteForApproval(bundleId);
-      alert(`Decision created. Submitted for Finance approval: ${approvalId}`);
+      store.submitQuoteForApproval(bundleId);
       router.push("/fulfilment/quote-approvals");
     }
   };

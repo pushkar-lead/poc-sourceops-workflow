@@ -273,11 +273,12 @@ export default function RfqBundleDetailPage() {
             {winningQuotes.map((q) => {
               const supplierPo = store.supplierPos.find((sp) => sp.terms?.referenceNo === q.sellerPiNo);
               const invite = bundle.invites.find((i) => i.supplierEmail === q.supplierEmail);
+              const wonCount = approvedDecision.selectedQuoteLines.filter((sel) => q.lines.some((l) => l.id === sel.quoteLineId)).length;
               return (
                 <div key={q.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3">
                   <div className="min-w-0">
                     <div className="text-sm font-medium">{invite?.supplierName ?? q.supplierEmail}</div>
-                    <div className="text-xs text-muted-foreground">{q.supplierEmail} · {q.lines.length} line(s) won</div>
+                    <div className="text-xs text-muted-foreground">{q.supplierEmail} · {wonCount} line(s) won</div>
                   </div>
                   {q.sellerPiNo ? (
                     <div className="flex items-center gap-2 text-sm">

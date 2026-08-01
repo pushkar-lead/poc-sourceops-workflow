@@ -44,6 +44,7 @@ export default function SupplierPosPage() {
               }>
               {(spo.supplier.gstin || spo.terms) && (
                 <div className="mb-3 flex flex-wrap gap-x-4 gap-y-1 border-b pb-2 text-xs text-muted-foreground">
+                  {spo.terms?.referenceNo && <span>Raised against <span className="font-mono text-foreground">{spo.terms.referenceNo}</span></span>}
                   {spo.supplier.gstin && <span>GSTIN {spo.supplier.gstin}{spo.supplier.state ? ` · ${spo.supplier.state}` : ""}</span>}
                   {!spo.supplier.gstin && spo.supplier.state && <span>{spo.supplier.state}</span>}
                   <span>{spo.tradeType === "INTERNATIONAL" ? "Intl" : "Domestic"} · {spo.incoterm}</span>

@@ -8,6 +8,7 @@ import { Panel, Button, PageHeader, FormTabBar, StickyBar } from "@/components/u
 import { Labeled, Input, Select } from "@/components/ui/form";
 import { useStore } from "@/store/store";
 import { PAYMENT_METHODS } from "@/data/enums";
+import { BUYERS } from "@/data/directory";
 import { extractClientPo } from "@/integrations/doc-extract";
 import { money, cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -25,7 +26,7 @@ export default function CreateClientPoPage() {
   const [parsedFrom, setParsedFrom] = useState<string | null>(null);
   const [parsing, setParsing] = useState(false);
   const [f, setF] = useState({
-    clientName: "", clientPoNo: "", paymentMode: "CREDIT", clientGstin: "", clientState: "",
+    clientId: "", clientName: "", clientPoNo: "", paymentMode: "CREDIT", clientGstin: "", clientState: "",
     referenceNo: "", gstNote: "GST extra @ actual", paymentMethod: "", deliveryTerms: "", testingTerms: "", warranty: "",
     addrLine1: "", addrCity: "", addrState: "", addrPincode: "", addrCountry: "IN",
   });
@@ -55,6 +56,18 @@ export default function CreateClientPoPage() {
       setParsing(false);
     }
   }
+  const handleSelectBuyer = (buyerId: string) => {
+    const buyer = BUYERS.find((b) => b.id === buyerId);
+    if (buyer) {
+      setF((p) => ({
+        ...p,
+        clientId: buyer.id,
+        clientName: buyer.name,
+        clientGstin: buyer.gstin || "",
+        clientState: buyer.country === "IN" ? "Tamil Nadu" : buyer.country,
+      }));
+    }
+  };
   const updateLine = (i: number, k: keyof Line, v: string | number) => setLines((ls) => ls.map((l, j) => (j === i ? { ...l, [k]: v } : l)));
   const addLine = () => setLines((ls) => [...ls, { mpn: "", make: "", dateCode: "", qty: 0, price: 0, requiredBy: "" }]);
   const removeLine = (i: number) => setLines((ls) => (ls.length > 1 ? ls.filter((_, j) => j !== i) : ls));
@@ -112,7 +125,14 @@ export default function CreateClientPoPage() {
       {tab === "parties" && (
         <Panel title="Client & parties">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <Labeled label="Client (buyer)" required><Input value={f.clientName} onChange={(e) => set("clientName", e.target.value)} placeholder="GEES Innovations Pvt Ltd" /></Labeled>
+            <Labeled label="Client (buyer)" required>
+              <Select value={f.clientId} onChange={(e) => handleSelectBuyer(e.target.value)}>
+                <option value="">-- Select a buyer --</option>
+                {BUYERS.map((buyer) => (
+                  <option key={buyer.id} value={buyer.id}>{buyer.name}</option>
+                ))}
+              </Select>
+            </Labeled>
             <Labeled label="Client PO no"><Input value={f.clientPoNo} onChange={(e) => set("clientPoNo", e.target.value)} placeholder="GIPL/26-27/PO/121" /></Labeled>
             <Labeled label="Client pays us"><Select value={f.paymentMode} onChange={(e) => set("paymentMode", e.target.value)}><option>ADVANCE</option><option>ESCROW</option><option>CREDIT</option></Select></Labeled>
             <Labeled label="Client GSTIN / UIN"><Input value={f.clientGstin} onChange={(e) => set("clientGstin", e.target.value)} placeholder="33AALCG9069K1Z0" /></Labeled>

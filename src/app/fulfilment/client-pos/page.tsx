@@ -40,6 +40,7 @@ export default function ClientPosPage() {
               actions={<span className="flex items-center gap-2"><Pill tone={cpo.paymentMode === "ESCROW" ? "warn" : "neutral"}>{cpo.paymentMode}</Pill><Pill tone={statusTone(status)}>{prettyStatus(status)}</Pill></span>}>
               {(cpo.client.gstin || cpo.terms || fmtAddress(cpo.deliveryAddress)) && (
                 <div className="mb-3 flex flex-wrap gap-x-4 gap-y-1 border-b pb-2 text-xs text-muted-foreground">
+                  {cpo.terms?.referenceNo && <span>Raised against <span className="font-mono text-foreground">{cpo.terms.referenceNo}</span></span>}
                   {cpo.client.gstin && <span>GSTIN {cpo.client.gstin}{cpo.client.state ? ` · ${cpo.client.state}` : ""}</span>}
                   {cpo.terms?.paymentMethod && <span>Pay: {cpo.terms.paymentMethod}</span>}
                   {cpo.terms?.deliveryTerms && <span>{cpo.terms.deliveryTerms}</span>}

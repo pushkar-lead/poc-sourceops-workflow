@@ -2,11 +2,12 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Package, CheckCircle2, Wallet, FlaskConical, FileText, ClipboardList, Landmark, Truck, PackageCheck, BookOpen, Webhook, Warehouse, X } from "lucide-react";
+import { LayoutDashboard, Package, CheckCircle2, Wallet, FlaskConical, FileText, ClipboardList, Landmark, Truck, PackageCheck, BookOpen, Webhook, Warehouse, X, PlusCircle, SendHorizontal, Mail, DollarSign, Users } from "lucide-react";
 import { NAV_GROUPS } from "@/data/enums";
 import { cn } from "@/lib/utils";
 
-const ICONS = { LayoutDashboard, Package, CheckCircle2, Wallet, FlaskConical, FileText, ClipboardList, Landmark, Truck, PackageCheck, BookOpen, Webhook, Warehouse } as const;
+const ICONS = { LayoutDashboard, Package, CheckCircle2, Wallet, FlaskConical, FileText, ClipboardList, Landmark, Truck, PackageCheck, BookOpen, Webhook, Warehouse, PlusCircle, SendHorizontal, Mail, DollarSign, Users } as const;
+// FileText is already imported and used
 
 // The sidebar is a fixed dark surface regardless of the (light) app theme.
 function Brand() {

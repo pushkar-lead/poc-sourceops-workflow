@@ -359,10 +359,10 @@ function seedSteps(o: Order): Seed[] {
     s.push({ phase: "IMPORT", name: intl ? "Ship to India (inbound AWB)" : "Export to lab → re-import", owner: "SC", isGate: true });
     s.push({ phase: "CUSTOMS", name: "Customs — BOE filed in ICEGATE", owner: "CHA", isGate: true });
   }
-  s.push({ phase: "RELABEL", name: "Receive + relabel to 1Buy", owner: "SC", isGate: false });
+  s.push({ phase: "RELABEL", name: "Receive + relabel to 1Buy", owner: "SC", isGate: true }); // gated: mark relabelled on the Journey tab
   s.push({ phase: "DELIVERY", name: "e-Invoice + dispatch to client", owner: "SC", isGate: true }); // gated: all lines must be mapped to demand
   s.push({ phase: "DELIVERY", name: "Proof of delivery", owner: "SC", isGate: false });
-  s.push({ phase: "CLOSE", name: "Reconcile + close", owner: "Finance", isGate: false });
+  s.push({ phase: "CLOSE", name: "Reconcile + close", owner: "Finance", isGate: true }); // gated: every approval on the order must be APPROVED
   return s;
 }
 
@@ -1106,6 +1106,7 @@ export const CLIENT_POS: ClientPO[] = [
     lines: [{ mpn: "XC7A35T-2FGG484I", make: "AMD (Xilinx)", dateCode: "24+", qty: 120, unitPrice: 296.5, requiredBy: "2026-08-25", status: "ALLOCATED" }] },
   { id: "cpo-3", clientPoNo: "GIPL/26-27/PO/121", client: { name: "GEES Innovations Pvt Ltd", country: "IN", gstin: "33AALCG9069K1Z0", state: "Tamil Nadu" }, paymentMode: "CREDIT", status: "CONFIRMED",
     terms: { referenceNo: "GIPL/26-27/PO/121", gstNote: "GST extra @ actual", deliveryTerms: "Test Report Along with Shipment", paymentMethod: "As agreed" },
+    deliveryAddress: { name: "GEES Innovations Pvt Ltd", line1: "SIPCOT IT Park, Siruseri", city: "Chennai", state: "Tamil Nadu", pincode: "603103", country: "IN" },
     lines: [{ mpn: "MIC5282-5.0YMME-TR", make: "Microchip", dateCode: "25+", qty: 12500, unitPrice: 345.6, requiredBy: "2026-07-20", status: "OPEN" }] },
   // DEMO — domestic client (India), pays us on ADVANCE; sourced from an international supplier on ESCROW (see spo-221)
   { id: "cpo-4", clientPoNo: "BEL/26-27/PO/0042", client: { name: "Bharat Defence Electronics Ltd", country: "IN", gstin: "29AABCB1234M1Z8", state: "Karnataka" }, paymentMode: "ADVANCE", status: "CONFIRMED",
@@ -1230,9 +1231,9 @@ export const SUPPLIER_POS: SupplierPO[] = [
   {
     id: "spo-201", poNo: "SPO-2026-0201", supplier: { name: "Oleti Development Co", country: "HK", state: "Hong Kong" },
     tradeType: "INTERNATIONAL", currency: "USD", incoterm: "EXW", paymentMode: "ADVANCE", testing: "WHL",
-    leadTimeDays: 1, testingTimeDays: 6, deliveryTimeDays: 9,
+    leadTimeDays: 19, testingTimeDays: 6, deliveryTimeDays: 9,
     terms: {
-      referenceNo: "RFQBUNDLE_124612_20_07_2026", paymentMethod: "Advance via T/T", dispatchedThrough: "DHL",
+      referenceNo: "RFQBUNDLE_201773_25_07_2026", paymentMethod: "Advance via T/T", dispatchedThrough: "DHL",
       destination: "1Buy hub — New Delhi", deliveryTerms: "Test report along with shipment", dateCode: "25+",
       warranty: "1 year", testFailureBearer: "SUPPLIER", labLocation: "WHL Shenzhen & Hong Kong",
       packing: "Packing list + Commercial Invoice; WHSO# on outside box",
@@ -1246,7 +1247,7 @@ export const SUPPLIER_POS: SupplierPO[] = [
     id: "spo-202", poNo: "SPO-2026-0202", supplier: { name: "Pune Traders", country: "IN", gstin: "27AAECP1234R1Z5", state: "Maharashtra" },
     tradeType: "DOMESTIC", currency: "INR", incoterm: "EXW", paymentMode: "ADVANCE", testing: "SUPPLIER_SELF",
     leadTimeDays: 7, testingTimeDays: 3, deliveryTimeDays: 4,
-    terms: { paymentMethod: "50% advance", gstNote: "GST extra @ actual", warranty: "6 months" },
+    terms: { referenceNo: "PT/26-27/PO/005", paymentMethod: "50% advance", gstNote: "GST extra @ actual", warranty: "6 months" },
     lines: [
       { mpn: "LM317T", make: "TI", qty: 2000, buyUnitPrice: 20, marginPct: 10 }, // unlinked — map to a buyer PO later
     ],

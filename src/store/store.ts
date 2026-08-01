@@ -7,6 +7,8 @@ import type {
   PaymentStatus, ShipmentLeg, ShipmentStatus, TradeType, ApprovalState,
   LotTest, MpnTestSpec, TestAuditEntry, TestProcessStatus, WhlReport, LabEmail, NotifyParty,
   Lot, TestingStage, LotDispatch,
+  DemandLine, RfqBundle, SupplierQuote, ClientQuoteDecision, ClientQuote, QuoteEmail, RfqBundleStatus,
+  DemandLinesMap, RfqBundlesMap, SupplierQuotesMap, ClientQuoteDecisionsMap, ClientQuotesMap,
 } from "@/types";
 import { ORDERS, CLIENT_POS, SUPPLIER_POS, ONEBUY_HUB, getOrderBundle, buildJourney } from "@/data/fixtures";
 import { remainingToShipLeg, remainingToAllocate, gateReason, sourcedForClientLine, mappedForOrderLine, orderSourcedForClient, deliveredForClientLine, lotStage } from "@/store/selectors";
@@ -30,6 +32,8 @@ import { bankInitiateTransfer, bankGetTransferStatus } from "@/integrations/bank
 import { generateIrn } from "@/integrations/einvoice-irp";
 import { sendPartyNotification } from "@/integrations/notify";
 import type { EscrowFeeBreakdown, EscrowConditions, EscrowContact, Escrow, WhlVerdict, EscrowSendPurpose, EscrowReceivePurpose } from "@/types";
+import { sendRfqInvite } from "@/integrations/rfq-send";
+import { BUYERS, SUPPLIERS } from "@/data/directory";
 
 export interface EscrowEmailDraft { to: string; subject: string; body: string; }
 
@@ -40,7 +44,7 @@ const WHL_PROGRESS_SNIPPETS = [
   "Preliminary results under internal review before the formal report.",
 ];
 
-const SHARPBUY_GSTIN = "27AASCS1234A1Z5"; // masking entity's GSTIN — the only seller GSTIN sent to the IRP
+const SHARPBUY_GSTIN = "27AASCS1234A1Z5"; // masking entity's GSTIN - the only seller GSTIN sent to the IRP
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -90,10 +94,173 @@ function moveStage(
 }
 
 
-function freshSeed(): { orders: OrdersMap; clientPos: typeof CLIENT_POS; supplierPos: SupplierPO[] } {
+function freshSeed(): { orders: OrdersMap; clientPos: typeof CLIENT_POS; supplierPos: SupplierPO[]; demandLines: DemandLinesMap; rfqBundles: RfqBundlesMap; supplierQuotes: SupplierQuotesMap; clientQuoteDecisions: ClientQuoteDecisionsMap; clientQuotes: ClientQuotesMap; quoteEmails: Record<string, QuoteEmail> } {
   const orders: OrdersMap = {};
   for (const o of ORDERS) { const b = getOrderBundle(o.id); if (b) orders[o.id] = b; }
-  return JSON.parse(JSON.stringify({ orders, clientPos: CLIENT_POS, supplierPos: SUPPLIER_POS }));
+
+  // Sample client RFQs for demo (10 diverse requests)
+  const demandLines: DemandLinesMap = {
+    "dem-001": {
+      id: "dem-001",
+      mpn: "STM32F407VG",
+      qty: 500,
+      targetPrice: 8.50,
+      currency: "USD",
+      requiredByDate: "2026-08-31",
+      source: "email",
+      clientPoId: "buyer-001",
+      createdAt: today(),
+    },
+    "dem-002": {
+      id: "dem-002",
+      mpn: "STM32H745ZIT6",
+      qty: 300,
+      targetPrice: 12.00,
+      currency: "USD",
+      requiredByDate: "2026-08-25",
+      source: "email",
+      clientPoId: "buyer-002",
+      createdAt: today(),
+    },
+    "dem-003": {
+      id: "dem-003",
+      mpn: "NXP IMXRT1062DVJ6A",
+      qty: 200,
+      targetPrice: 9.75,
+      currency: "USD",
+      requiredByDate: "2026-09-10",
+      source: "manual",
+      clientPoId: "buyer-003",
+      createdAt: today(),
+    },
+    "dem-004": {
+      id: "dem-004",
+      mpn: "TI CC3235MODASF",
+      qty: 150,
+      targetPrice: 15.50,
+      currency: "USD",
+      requiredByDate: "2026-08-28",
+      source: "email",
+      clientPoId: "buyer-004",
+      createdAt: today(),
+    },
+    "dem-005": {
+      id: "dem-005",
+      mpn: "EFM32GG11B820F1024GL120",
+      qty: 250,
+      targetPrice: 11.25,
+      currency: "USD",
+      requiredByDate: "2026-09-05",
+      source: "email",
+      clientPoId: "buyer-005",
+      createdAt: today(),
+    },
+    "dem-006": {
+      id: "dem-006",
+      mpn: "MCP2515-I/P",
+      qty: 400,
+      targetPrice: 3.25,
+      currency: "USD",
+      requiredByDate: "2026-09-15",
+      source: "manual",
+      clientPoId: "buyer-001",
+      createdAt: today(),
+    },
+    "dem-007": {
+      id: "dem-007",
+      mpn: "LM7812CT",
+      qty: 600,
+      targetPrice: 2.10,
+      currency: "USD",
+      requiredByDate: "2026-08-22",
+      source: "email",
+      clientPoId: "buyer-002",
+      createdAt: today(),
+    },
+    "dem-008": {
+      id: "dem-008",
+      mpn: "ATmega328P-AU",
+      qty: 350,
+      targetPrice: 4.50,
+      currency: "USD",
+      requiredByDate: "2026-09-20",
+      source: "manual",
+      clientPoId: "buyer-003",
+      createdAt: today(),
+    },
+    "dem-009": {
+      id: "dem-009",
+      mpn: "INA219AIDEBT",
+      qty: 180,
+      targetPrice: 5.75,
+      currency: "USD",
+      requiredByDate: "2026-09-08",
+      source: "email",
+      clientPoId: "buyer-004",
+      createdAt: today(),
+    },
+    "dem-010": {
+      id: "dem-010",
+      mpn: "SSD1306",
+      qty: 220,
+      targetPrice: 6.80,
+      currency: "USD",
+      requiredByDate: "2026-09-12",
+      source: "manual",
+      clientPoId: "buyer-005",
+      createdAt: today(),
+    },
+  };
+
+  // Demo RFQ bundle already floated + quoted, so Compare/Decide/Approve is demoable
+  // without first walking the supplier portal by hand.
+  const rfqBundles: RfqBundlesMap = {
+    "rfq-demo-001": {
+      id: "rfq-demo-001",
+      lines: [
+        { id: "rlin-demo-1", rfqBundleId: "rfq-demo-001", demandLineIds: ["dem-001"], mpn: "STM32F407VG", alternateGroupId: "alt-STM32F407VG", aggregatedQty: 500, targetPrice: 8.50, currency: "USD", clientPoId: "buyer-001", clientLineIds: [] },
+        { id: "rlin-demo-2", rfqBundleId: "rfq-demo-001", demandLineIds: ["dem-002"], mpn: "STM32H745ZIT6", alternateGroupId: "alt-STM32H745ZIT6", aggregatedQty: 300, targetPrice: 12.00, currency: "USD", clientPoId: "buyer-002", clientLineIds: [] },
+      ],
+      invites: [
+        { id: "inv-demo-1", rfqBundleId: "rfq-demo-001", supplierName: "Shanghai Electronics Co.", supplierEmail: "export@shanghai-elec.com", status: "QUOTED", portalToken: "tok-demo-shanghai", expiresAt: "2026-08-20", sentAt: "2026-08-01" },
+        { id: "inv-demo-2", rfqBundleId: "rfq-demo-001", supplierName: "Bangalore IC Systems", supplierEmail: "sales@bangalore-ic.com", status: "QUOTED", portalToken: "tok-demo-bangalore", expiresAt: "2026-08-20", sentAt: "2026-08-01" },
+        { id: "inv-demo-3", rfqBundleId: "rfq-demo-001", supplierName: "Vietnam Manufacturing Ltd", supplierEmail: "export@vnmanufacture.com", status: "QUOTED", portalToken: "tok-demo-vietnam", expiresAt: "2026-08-20", sentAt: "2026-08-01" },
+      ],
+      status: "QUOTES_IN",
+      deadline: "2026-08-15",
+      dateToleranceDays: 7,
+      createdAt: "2026-08-01",
+    },
+  };
+
+  const supplierQuotes: SupplierQuotesMap = {
+    "quote-demo-shanghai": {
+      id: "quote-demo-shanghai", rfqBundleId: "rfq-demo-001", supplierEmail: "export@shanghai-elec.com", status: "SUBMITTED", submittedAt: "2026-08-05",
+      lines: [
+        { id: "ql-demo-sh-1", rfqLineId: "rlin-demo-1", supplierEmail: "export@shanghai-elec.com", quotedMpn: "STM32F407VG", stockQty: 500, unitPrice: 7.85, currency: "USD", leadTimeDays: 12, leadTimeUnit: "days", incoterm: "EXW", location: "Shanghai, CN", packaging: "Tape & Reel", validityDays: 30, moq: 100, spq: 100, dateCode: "25+", termsConditions: [], stockSource: "warehouse", paymentTerms: "Advance via T/T", status: "ACTIVE" },
+        { id: "ql-demo-sh-2", rfqLineId: "rlin-demo-2", supplierEmail: "export@shanghai-elec.com", quotedMpn: "STM32H745ZIT6", stockQty: 300, unitPrice: 11.20, currency: "USD", leadTimeDays: 15, leadTimeUnit: "days", incoterm: "EXW", location: "Shanghai, CN", packaging: "Tape & Reel", validityDays: 30, moq: 50, spq: 50, dateCode: "25+", termsConditions: [], stockSource: "warehouse", paymentTerms: "Advance via T/T", status: "ACTIVE" },
+      ],
+    },
+    "quote-demo-bangalore": {
+      id: "quote-demo-bangalore", rfqBundleId: "rfq-demo-001", supplierEmail: "sales@bangalore-ic.com", status: "SUBMITTED", submittedAt: "2026-08-06",
+      lines: [
+        { id: "ql-demo-ba-1", rfqLineId: "rlin-demo-1", supplierEmail: "sales@bangalore-ic.com", quotedMpn: "STM32F407VG", stockQty: 500, unitPrice: 8.10, currency: "USD", leadTimeDays: 8, leadTimeUnit: "days", incoterm: "FOB", location: "Bangalore, IN", packaging: "Tray", validityDays: 21, moq: 50, spq: 50, dateCode: "25+", termsConditions: [], stockSource: "warehouse", paymentTerms: "Net 30 credit", status: "ACTIVE" },
+        { id: "ql-demo-ba-2", rfqLineId: "rlin-demo-2", supplierEmail: "sales@bangalore-ic.com", quotedMpn: "STM32H745ZIT6", stockQty: 300, unitPrice: 11.75, currency: "USD", leadTimeDays: 10, leadTimeUnit: "days", incoterm: "FOB", location: "Bangalore, IN", packaging: "Tray", validityDays: 21, moq: 25, spq: 25, dateCode: "25+", termsConditions: [], stockSource: "warehouse", paymentTerms: "Net 30 credit", status: "ACTIVE" },
+      ],
+    },
+    "quote-demo-vietnam": {
+      id: "quote-demo-vietnam", rfqBundleId: "rfq-demo-001", supplierEmail: "export@vnmanufacture.com", status: "SUBMITTED", submittedAt: "2026-08-07",
+      lines: [
+        { id: "ql-demo-vn-1", rfqLineId: "rlin-demo-1", supplierEmail: "export@vnmanufacture.com", quotedMpn: "STM32F407VG", stockQty: 500, unitPrice: 7.60, currency: "USD", leadTimeDays: 18, leadTimeUnit: "days", incoterm: "EXW", location: "Ho Chi Minh City, VN", packaging: "Tube", validityDays: 30, moq: 100, spq: 100, dateCode: "25+", termsConditions: [], stockSource: "warehouse", paymentTerms: "Advance via T/T", status: "ACTIVE" },
+        { id: "ql-demo-vn-2", rfqLineId: "rlin-demo-2", supplierEmail: "export@vnmanufacture.com", quotedMpn: "STM32H745ZIT6", stockQty: 300, unitPrice: 11.50, currency: "USD", leadTimeDays: 20, leadTimeUnit: "days", incoterm: "EXW", location: "Ho Chi Minh City, VN", packaging: "Tube", validityDays: 30, moq: 50, spq: 50, dateCode: "25+", termsConditions: [], stockSource: "warehouse", paymentTerms: "Advance via T/T", status: "ACTIVE" },
+      ],
+    },
+  };
+
+  return JSON.parse(JSON.stringify({
+    orders, clientPos: CLIENT_POS, supplierPos: SUPPLIER_POS,
+    demandLines, rfqBundles, supplierQuotes, clientQuoteDecisions: {}, clientQuotes: {}, quoteEmails: {},
+  }));
 }
 
 export interface ClientPoInput {
@@ -107,7 +274,7 @@ export interface SupplierPoInput {
   tradeType: TradeType; incoterm: string; currency: string; sellerPaymentMode: PaymentMode;
   lead: number; testDays: number; delivery: number; testing: TestingMode; terms?: PoTerms;
   creditDays?: number; termsConditions?: string[]; relabelCost?: number;
-  // lines may be LINKED to a client-PO line (partial ok, multi-client) or UNLINKED (client ref omitted — map later)
+  // lines may be LINKED to a client-PO line (partial ok, multi-client) or UNLINKED (client ref omitted - map later)
   lines: { mpn: string; make?: string; dateCode?: string; testing?: TestingMode; clientPoNo?: string; clientLineMpn?: string; qty: number; buyUnitPrice: number; marginPct: number }[];
 }
 
@@ -135,6 +302,13 @@ interface Store {
   orders: OrdersMap;
   clientPos: typeof CLIENT_POS;
   supplierPos: SupplierPO[];
+  // ---- RFQ Module State ----
+  demandLines: DemandLinesMap;
+  rfqBundles: RfqBundlesMap;
+  supplierQuotes: SupplierQuotesMap;
+  clientQuoteDecisions: ClientQuoteDecisionsMap;
+  clientQuotes: ClientQuotesMap;
+  quoteEmails: Record<string, QuoteEmail>;
 
   resetDemo: () => void;
   createClientPo: (input: ClientPoInput) => string;
@@ -143,10 +317,11 @@ interface Store {
 
   advanceStep: (orderId: string) => void;
   addStep: (orderId: string, step: { phase: string; name: string; owner: string; isGate: boolean }) => void;
+  markRelabelled: (orderId: string) => void;
 
   addLot: (orderId: string, lot: { orderLineMpn: string; lotCode: string; dateCode: string; qty: number; sampleQty: number; lab?: string }) => void;
   setLotStatus: (orderId: string, lotId: string, status: TestStatus) => void;
-  fetchLabResult: (orderId: string, lotId: string) => void; // WHL adapter — poll the report
+  fetchLabResult: (orderId: string, lotId: string) => void; // WHL adapter - poll the report
 
   // ---- WHL testing platform ----
   autofillMpnTests: (orderId: string, mpn?: string) => void;          // parse the PO's test table (never hand-typed)
@@ -170,7 +345,7 @@ interface Store {
   reconcileReportPo: (orderId: string, lotId: string, reportId: string) => void;
   // circulate a lot's result: supplier / buyer (masked from each other) / escrow / lab
   notifyLotResult: (orderId: string, lotId: string, m: { party: NotifyParty; to: string; subject: string; body: string; attachReport: boolean }) => void;
-  // one digest mail covering many lots — logged against every lot it covered
+  // one digest mail covering many lots - logged against every lot it covered
   notifyLotsResult: (orderId: string, lotIds: string[], m: { party: NotifyParty; to: string; subject: string; body: string; attachReports: boolean }) => void;
 
   addSourcingAllocation: (orderId: string, a: { orderLineId: string; orderLineMpn: string; clientPoNo: string; clientLineMpn: string; qty: number; marginPct: number }) => boolean;
@@ -196,11 +371,11 @@ interface Store {
 
   addPayment: (orderId: string, p: { direction: PaymentDirection; mode: PaymentMode; amount: number; triggerDoc: string; dueDate?: string }) => void;
   setPaymentStatus: (orderId: string, payId: string, status: PaymentStatus) => void;
-  initiatePaymentTransfer: (orderId: string, payId: string) => void; // banking adapter — T/T
+  initiatePaymentTransfer: (orderId: string, payId: string) => void; // banking adapter - T/T
 
   createShipment: (orderId: string, s: { leg: ShipmentLeg; carrier: string; fromLocation: string; toLocation: string; boxCount: number; grossWeightKg: number; lines: { mpn: string; qty: number }[] }) => string | null;
   setShipmentStatus: (orderId: string, shipId: string, status: ShipmentStatus) => void;
-  pollShipmentTracking: (orderId: string, shipId: string) => void; // logistics adapter — advance from carrier tracking
+  pollShipmentTracking: (orderId: string, shipId: string) => void; // logistics adapter - advance from carrier tracking
 
   fileBOE: (orderId: string, e: { shipmentNo: string; portCode: string; chaName: string; assessableValue: number }) => void; // ICEGATE adapter
 
@@ -214,6 +389,32 @@ interface Store {
   addDocument: (orderId: string, d: { subjectType: string; docType: string; fileName: string }) => void;
   attachPI: (orderId: string, p: { piNo: string; fileName: string }) => void; // upload the supplier PI (received upstream) onto the order
   decideApproval: (orderId: string, approvalId: string, status: ApprovalState) => void;
+
+  // ---- RFQ Module Actions ----
+  createDemandLine: (input: { mpn: string; qty: number; targetPrice: number; currency: string; requiredByDate: string; source: string; clientPoId?: string; clientLineId?: string }) => string;
+  createRfqBundle: (input: { demandLineIds: string[]; supplierEmails: string[]; deadline: string; dateToleranceDays: number }) => string | null;
+  floatRfqToSuppliers: (bundleId: string) => Promise<boolean>;
+  submitSupplierQuote: (input: { rfqBundleId: string; supplierEmail: string; lines: any[] }) => string | null;
+  matchQuoteEmail: (bundleId: string, emailId: string, rfqLineId: string) => boolean;
+  syncQuoteInbox: (bundleId: string) => Promise<{ matched: number; unmatched: number }>;
+  createClientQuoteDecision: (input: { rfqBundleId: string; selectedQuoteLineIds: string[]; markupPercent: number }) => string | null;
+  submitQuoteForApproval: (bundleId: string) => string;
+  submitCounterOffer: (bundleId: string, quoteLineId: string, price: number, notes?: string) => boolean;
+  recordSupplierCounter: (bundleId: string, quoteLineId: string, price: number) => void;
+  requestQuoteClarification: (bundleId: string, quoteLineId: string, ambiguityType: string) => Promise<void>;
+  sendClientQuote: (bundleId: string) => Promise<boolean>;
+  acceptClientQuote: (clientQuoteId: string) => Promise<void>;
+  declineClientQuote: (clientQuoteId: string) => void;
+  requestQuoteChanges: (clientQuoteId: string, notes: string) => void;
+  recordSellerPi: (supplierQuoteId: string, piNo: string) => void;
+  finalizeRfqToSupplierPos: (bundleId: string) => { poIds: string[]; pending: string[] } | null;
+
+  approveQuoteDecision: (decisionId: string) => Promise<void>;
+  rejectQuoteDecision: (decisionId: string, reason: string) => void;
+  resendSupplierInvite: (bundleId: string, inviteId: string) => Promise<boolean>;
+  markInviteViewed: (bundleId: string, portalToken: string) => void;
+  askSupplierQuestion: (bundleId: string, portalToken: string, question: string) => void;
+  answerSupplierQuestion: (bundleId: string, inviteId: string, questionId: string, answer: string) => void;
 }
 
 // Legacy escrow shapes carried a plain buyerEntity/sellerEntity string instead of a full contact
@@ -276,10 +477,20 @@ export const useStore = create<Store>()(
       orders: seed.orders,
       clientPos: seed.clientPos,
       supplierPos: seed.supplierPos,
+      demandLines: seed.demandLines,
+      rfqBundles: seed.rfqBundles,
+      supplierQuotes: seed.supplierQuotes,
+      clientQuoteDecisions: seed.clientQuoteDecisions,
+      clientQuotes: seed.clientQuotes,
+      quoteEmails: seed.quoteEmails,
 
       resetDemo: () => {
         const s = freshSeed();
-        set((st) => { st.orders = s.orders; st.clientPos = s.clientPos; st.supplierPos = s.supplierPos; });
+        set((st) => {
+          st.orders = s.orders; st.clientPos = s.clientPos; st.supplierPos = s.supplierPos;
+          st.demandLines = s.demandLines; st.rfqBundles = s.rfqBundles; st.supplierQuotes = s.supplierQuotes;
+          st.clientQuoteDecisions = s.clientQuoteDecisions; st.clientQuotes = s.clientQuotes; st.quoteEmails = s.quoteEmails;
+        });
         toast.success("Demo data reset");
       },
 
@@ -287,7 +498,7 @@ export const useStore = create<Store>()(
         const st = get();
         let clientPoNo = input.clientPoNo.trim();
         if (clientPoNo && st.clientPos.some((c) => c.clientPoNo === clientPoNo)) {
-          toast.error(`Client PO ${clientPoNo} already exists — use a unique number.`);
+          toast.error(`Client PO ${clientPoNo} already exists - use a unique number.`);
           return "";
         }
         if (!clientPoNo) { // collision-safe fallback
@@ -296,7 +507,7 @@ export const useStore = create<Store>()(
           clientPoNo = `CPO-${n}`;
         }
         const cpo: ClientPO = {
-          id: uid("cpo"), clientPoNo, client: { name: input.clientName || "—", country: "—", gstin: input.clientGstin, state: input.clientState },
+          id: uid("cpo"), clientPoNo, client: { name: input.clientName || "-", country: "-", gstin: input.clientGstin, state: input.clientState },
           paymentMode: input.paymentMode, status: "RECEIVED", terms: input.terms, deliveryAddress: input.deliveryAddress,
           lines: input.lines.map((l) => ({ mpn: l.mpn, make: l.make, dateCode: l.dateCode, qty: l.qty, unitPrice: l.unitPrice, requiredBy: l.requiredBy, status: "OPEN" })),
         };
@@ -305,7 +516,7 @@ export const useStore = create<Store>()(
         return clientPoNo;
       },
 
-      // STEP 2 — create the Supplier PO document (no fulfilment order yet)
+      // STEP 2 - create the Supplier PO document (no fulfilment order yet)
       createSupplierPo: (input) => {
         const st = get();
         if (input.lines.length === 0) { toast.error("Add at least one line."); return null; }
@@ -326,7 +537,7 @@ export const useStore = create<Store>()(
         const buyTotal = input.lines.reduce((a, l) => a + l.qty * l.buyUnitPrice, 0);
         const spo: SupplierPO = {
           id, poNo,
-          supplier: { name: input.supplier || "—", country: input.supplierCountry || "—", gstin: input.supplierGstin, state: input.supplierState },
+          supplier: { name: input.supplier || "-", country: input.supplierCountry || "-", gstin: input.supplierGstin, state: input.supplierState },
           tradeType: input.tradeType, currency: input.currency, incoterm: input.incoterm, paymentMode: input.sellerPaymentMode,
           testing: input.testing, leadTimeDays: input.lead, testingTimeDays: input.testDays, deliveryTimeDays: input.delivery,
           terms: input.terms, creditDays: input.creditDays, termsConditions: input.termsConditions, relabelCost: input.relabelCost,
@@ -334,11 +545,11 @@ export const useStore = create<Store>()(
           buyTotal: Math.round(buyTotal), createdBy: "You (demo)", createdAt: created, status: "DRAFT",
         };
         set((s) => { s.supplierPos.unshift(spo); });
-        toast.success(`Supplier PO ${poNo} created${linked.length < input.lines.length ? " — some lines unlinked" : ""}`);
+        toast.success(`Supplier PO ${poNo} created${linked.length < input.lines.length ? " - some lines unlinked" : ""}`);
         return id;
       },
 
-      // STEP 3 — select a Supplier PO and spin up its fulfilment order (the journey)
+      // STEP 3 - select a Supplier PO and spin up its fulfilment order (the journey)
       createOrderFromSupplierPo: (supplierPoId) => {
         const st = get();
         const spo = st.supplierPos.find((s) => s.id === supplierPoId);
@@ -347,7 +558,7 @@ export const useStore = create<Store>()(
         const linked = spo.lines.filter((l) => l.clientPoNo && l.clientLineMpn);
         const sellFor = (l: SupplierPoLine) =>
           l.clientPoNo && l.clientLineMpn ? (st.clientPos.find((c) => c.clientPoNo === l.clientPoNo)?.lines.find((x) => x.mpn === l.clientLineMpn)?.unitPrice ?? l.buyUnitPrice) : l.buyUnitPrice;
-        const clientNames = new Set(linked.map((l) => st.clientPos.find((c) => c.clientPoNo === l.clientPoNo)?.client.name ?? "—"));
+        const clientNames = new Set(linked.map((l) => st.clientPos.find((c) => c.clientPoNo === l.clientPoNo)?.client.name ?? "-"));
         const buyerName = clientNames.size === 0 ? "Unlinked (map later)" : clientNames.size === 1 ? [...clientNames][0] : "Multiple clients";
         // per-line testing (fallback to the PO default); the order's summary mode drives the journey label + A19 customs
         const lineTesting = (l: SupplierPoLine): TestingMode => l.testing ?? spo.testing;
@@ -364,7 +575,7 @@ export const useStore = create<Store>()(
         const order: Order = {
           id, orderNo: `ORD-2026-000${no}`, operatingMode: "MOR", tradeType: spo.tradeType,
           status: "ACTIVE", approvalStatus: "APPROVED", // approved upstream on the sourcing platform
-          buyer: { name: buyerName, country: "—" }, supplier: spo.supplier,
+          buyer: { name: buyerName, country: "-" }, supplier: spo.supplier,
           maskingEntity: "Sharpbuy Global Solutions", currency: spo.currency, incoterm: spo.incoterm,
           paymentMode: spo.paymentMode, leadTimeDays: spo.leadTimeDays, testingTimeDays: spo.testingTimeDays,
           deliveryTimeDays: spo.deliveryTimeDays, testingMode: aggTesting,
@@ -376,17 +587,17 @@ export const useStore = create<Store>()(
         };
         const dcOf = (l: SupplierPoLine) => l.dateCode
           ?? (l.clientPoNo && l.clientLineMpn ? st.clientPos.find((c) => c.clientPoNo === l.clientPoNo)?.lines.find((x) => x.mpn === l.clientLineMpn)?.dateCode : undefined)
-          ?? "—";
+          ?? "-";
         const orderLines: OrderLine[] = spo.lines.map((l, i) => {
           const t = lineTesting(l);
           return {
-            id: uid("l"), lineNo: i + 1, mpn: l.mpn, make: l.make ?? "—", description: l.clientPoNo ? `For ${l.clientPoNo}` : "Unlinked — map later", hsnCode: "—",
+            id: uid("l"), lineNo: i + 1, mpn: l.mpn, make: l.make ?? "-", description: l.clientPoNo ? `For ${l.clientPoNo}` : "Unlinked - map later", hsnCode: "-",
             quantity: l.qty, unitPrice: l.buyUnitPrice, currency: spo.currency, dateCode: dcOf(l),
-            coo: spo.tradeType === "INTERNATIONAL" ? "—" : "IN", testingRequired: t !== "NONE",
-            testingMode: t, componentCategory: "—", lab: t === "WHL" ? "WHL Shenzhen" : undefined,
+            coo: spo.tradeType === "INTERNATIONAL" ? "-" : "IN", testingRequired: t !== "NONE",
+            testingMode: t, componentCategory: "-", lab: t === "WHL" ? "WHL Shenzhen" : undefined,
           };
         });
-        const bundle = scaffoldBundle(order, orderLines, `Order created from ${spo.poNo} — ${spo.lines.length} line(s)${linked.length ? `, ${linked.length} linked` : " (unlinked — map later)"}.`);
+        const bundle = scaffoldBundle(order, orderLines, `Order created from ${spo.poNo} - ${spo.lines.length} line(s)${linked.length ? `, ${linked.length} linked` : " (unlinked - map later)"}.`);
         spo.lines.forEach((l, i) => {
           if (l.clientPoNo && l.clientLineMpn) bundle.sourcingAllocations.push({ id: uid("sa"), orderLineId: orderLines[i].id, clientPoNo: l.clientPoNo, clientLineMpn: l.clientLineMpn, orderLineMpn: l.mpn, qty: l.qty, marginPct: l.marginPct });
         });
@@ -397,7 +608,7 @@ export const useStore = create<Store>()(
         }
         // fulfilment starts here: step 0 (received) done, step 1 (first fulfilment gate) in progress
         bundle.journey.forEach((s, i) => { s.status = i === 0 ? "DONE" : i === 1 ? "IN_PROGRESS" : "PENDING"; });
-        // non-escrow orders collect from the client and pay the supplier via T/T — seed both tasks so the payment gates are immediately actionable
+        // non-escrow orders collect from the client and pay the supplier via T/T - seed both tasks so the payment gates are immediately actionable
         if (order.paymentMode !== "ESCROW") {
           bundle.payments.push(
             { id: uid("pay"), direction: "CLIENT_TO_1BUY", mode: order.paymentMode, triggerDoc: "Our PI", amount: order.sellTotal, currency: order.currency, status: "PENDING" },
@@ -409,7 +620,7 @@ export const useStore = create<Store>()(
           const target = s.supplierPos.find((x) => x.id === supplierPoId);
           if (target) { target.status = "ORDERED"; target.orderId = id; }
         });
-        toast.success(`Order ${order.orderNo} created from ${spo.poNo} — ready for fulfilment`);
+        toast.success(`Order ${order.orderNo} created from ${spo.poNo} - ready for fulfilment`);
         return id;
       },
 
@@ -440,11 +651,16 @@ export const useStore = create<Store>()(
         b.journey.push({ id: uid("j"), seq, phase: step.phase as JourneyPhase, name: step.name, owner: step.owner, isGate: step.isGate, status: "PENDING" });
       }); toast.success("Step added"); },
 
+      markRelabelled: (orderId) => {
+        set((s) => { const b = s.orders[orderId]; if (b) b.relabelledAt = today(); });
+        toast.success("Goods marked as received + relabelled to 1Buy");
+      },
+
       addLot: (orderId, lot) => {
         const lotId = uid("lot");
         set((s) => {
           const b = s.orders[orderId]; if (!b) return;
-          // lot logic is unchanged — it just inherits the MPN's PO-parsed test list as its status tracker
+          // lot logic is unchanged - it just inherits the MPN's PO-parsed test list as its status tracker
           const spec = (b.mpnTests ?? []).find((x) => x.mpn === lot.orderLineMpn);
           const tests: LotTest[] = (spec?.tests ?? []).map((t) => ({
             id: uid("lt"), requirementId: t.id, name: t.name, standard: t.standard, source: t.source, status: "PENDING",
@@ -456,7 +672,7 @@ export const useStore = create<Store>()(
             sampleQty: lot.sampleQty, testStatus: "PENDING", lab: lot.lab, clientPoNo, tests, reports: [],
           });
         });
-        toast.message("Lot added — submitting to WHL…");
+        toast.message("Lot added - submitting to WHL…");
         // WHL adapter: register the test job, stamp the work-order no back onto the lot
         void (async () => {
           try {
@@ -489,12 +705,12 @@ export const useStore = create<Store>()(
         void (async () => {
           try {
             const rep = await whlPollTestReport(lot.workOrderNo!);
-            if (rep.status !== "COMPLETED" || !rep.verdict) { toast("WHL still in progress — try again shortly."); return; }
+            if (rep.status !== "COMPLETED" || !rep.verdict) { toast("WHL still in progress - try again shortly."); return; }
             const st = mapVerdict(rep.verdict);
             set((s) => { const l = s.orders[orderId]?.lots.find((x) => x.id === lotId); if (l) { l.testStatus = st; l.reportNo = rep.reportNo; l.tatDays = rep.tatDays; l.testedAt = today(); } });
-            if (st === "PASS") toast.success(`WHL PASS — report ${rep.reportNo}`);
-            else if (st === "FAIL") toast.error(`WHL FAIL — report ${rep.reportNo}`);
-            else toast(`WHL inconclusive — report ${rep.reportNo}`);
+            if (st === "PASS") toast.success(`WHL PASS - report ${rep.reportNo}`);
+            else if (st === "FAIL") toast.error(`WHL FAIL - report ${rep.reportNo}`);
+            else toast(`WHL inconclusive - report ${rep.reportNo}`);
           } catch (e) { toast.error(`WHL: ${errMsg(e)}`); }
         })();
       },
@@ -526,14 +742,14 @@ export const useStore = create<Store>()(
                   audit: [],
                 };
                 const prev = b.mpnTests.find((x) => x.mpn === m.mpn);
-                // keep manual additions across a re-parse — they're human corrections, not PO data
+                // keep manual additions across a re-parse - they're human corrections, not PO data
                 const manual = prev?.tests.filter((t) => t.source === "MANUAL") ?? [];
                 spec.tests.push(...manual);
                 spec.audit = [
                   ...(prev?.audit ?? []),
                   auditRow({
                     by: "Doc extraction (auto)", action: "AUTOFILL", target: m.mpn,
-                    before: prev ? `${prev.tests.length} test(s)` : "—",
+                    before: prev ? `${prev.tests.length} test(s)` : "-",
                     after: failed ? "auto-fill failed" : `${m.tests.length} test(s) from ${res.sourceDoc}`,
                     note: m.note ?? `Confidence ${Math.round(m.confidence * 100)}%.`,
                   }),
@@ -551,7 +767,7 @@ export const useStore = create<Store>()(
               }
             });
             const bad = res.mpns.filter((m) => m.tests.length === 0 && m.note && !m.note.startsWith("PO specifies no")).length;
-            if (bad) toast.warning(`${bad} MPN(s) need manual review — auto-fill failed.`);
+            if (bad) toast.warning(`${bad} MPN(s) need manual review - auto-fill failed.`);
             else toast.success("Test requirements auto-filled from the PO");
           } catch (e) {
             // whole-document failure: flag every target MPN rather than silently leaving them blank
@@ -565,7 +781,7 @@ export const useStore = create<Store>()(
                 else b.mpnTests.push({ id: uid("spec"), mpn: m, autofill: "FAILED", autofillNote: errMsg(e), sourceDoc, parsedAt: stamp(), tests: [], audit: [row] });
               }
             });
-            toast.error(`Auto-fill failed — needs manual review (${errMsg(e)})`);
+            toast.error(`Auto-fill failed - needs manual review (${errMsg(e)})`);
           }
         })();
       },
@@ -580,7 +796,7 @@ export const useStore = create<Store>()(
           if (spec.tests.some((x) => x.name.toLowerCase() === t.name.trim().toLowerCase())) return;
           const reqId = uid("req");
           spec.tests.push({ id: reqId, name: t.name.trim(), standard: t.standard, source: "MANUAL", addedBy: ME, addedAt: stamp() });
-          spec.audit.push(auditRow({ by: ME, action: "ADD", target: t.name.trim(), before: "—", after: `manual test${t.standard ? ` (${t.standard})` : ""}`, note: "Manual override of the auto-filled list." }));
+          spec.audit.push(auditRow({ by: ME, action: "ADD", target: t.name.trim(), before: "-", after: `manual test${t.standard ? ` (${t.standard})` : ""}`, note: "Manual override of the auto-filled list." }));
           if (spec.autofill === "FAILED") spec.autofill = "PENDING"; // reviewed by a human now
           for (const lot of b.lots.filter((l) => l.orderLineMpn === mpn)) {
             lot.tests ??= [];
@@ -589,7 +805,7 @@ export const useStore = create<Store>()(
               history: [auditRow({ by: ME, action: "ADD", target: t.name.trim(), after: "PENDING", note: "Added manually to this lot's tracker." })] });
           }
         });
-        toast.success(`Test added — ${t.name}`);
+        toast.success(`Test added - ${t.name}`);
       },
 
       removeMpnTest: (orderId, mpn, testId) => {
@@ -598,7 +814,7 @@ export const useStore = create<Store>()(
           const spec = (b.mpnTests ?? []).find((x) => x.mpn === mpn); if (!spec) return;
           const t = spec.tests.find((x) => x.id === testId); if (!t) return;
           spec.tests = spec.tests.filter((x) => x.id !== testId);
-          spec.audit.push(auditRow({ by: ME, action: "DELETE", target: t.name, before: `${t.source === "AUTO_PO" ? "auto-filled" : "manual"} test`, after: "—", note: "Removed by operator." }));
+          spec.audit.push(auditRow({ by: ME, action: "DELETE", target: t.name, before: `${t.source === "AUTO_PO" ? "auto-filled" : "manual"} test`, after: "-", note: "Removed by operator." }));
           for (const lot of b.lots.filter((l) => l.orderLineMpn === mpn)) {
             const lt = (lot.tests ?? []).find((x) => x.name === t.name);
             if (lt) lot.tests = (lot.tests ?? []).filter((x) => x.id !== lt.id);
@@ -728,7 +944,7 @@ export const useStore = create<Store>()(
         void (async () => {
           try {
             const rep = await whlFetchReport({
-              workOrderNo: lot.workOrderNo!, mpn: lot.orderLineMpn, manufacturer: line?.make ?? "—", lotQty: lot.qty,
+              workOrderNo: lot.workOrderNo!, mpn: lot.orderLineMpn, manufacturer: line?.make ?? "-", lotQty: lot.qty,
               client: b0.maskingEntity, clientPo: lot.clientPoNo, revision,
               testNames: (lot.tests ?? []).map((t) => t.name),
             });
@@ -747,8 +963,8 @@ export const useStore = create<Store>()(
                 confidentialityNote: rep.confidentialityNote, parseFlags: [...rep.parseFlags], accessLog: [],
               };
               // reconciliation: the report must agree with the lot it was raised for
-              if (rep.partNumber !== l.orderLineMpn) stored.parseFlags.push(`Report MPN ${rep.partNumber} ≠ lot MPN ${l.orderLineMpn} — verify before acting on this report.`);
-              if (l.clientPoNo && rep.clientPo !== "PO Unknown" && rep.clientPo !== l.clientPoNo) stored.parseFlags.push(`Report Client P/O ${rep.clientPo} ≠ ${l.clientPoNo} on file — reconcile.`);
+              if (rep.partNumber !== l.orderLineMpn) stored.parseFlags.push(`Report MPN ${rep.partNumber} ≠ lot MPN ${l.orderLineMpn} - verify before acting on this report.`);
+              if (l.clientPoNo && rep.clientPo !== "PO Unknown" && rep.clientPo !== l.clientPoNo) stored.parseFlags.push(`Report Client P/O ${rep.clientPo} ≠ ${l.clientPoNo} on file - reconcile.`);
               l.reports.push(stored);
               l.reportNo = stored.reportNo;
               l.testedAt = stored.reportDate;
@@ -764,12 +980,12 @@ export const useStore = create<Store>()(
                 }
                 const before = t.status;
                 t.status = next; t.acceptQty = p.acceptQty; t.rejectQty = p.rejectQty; t.updatedAt = stamp();
-                t.history.push(auditRow({ by: WHL_BOT, action: "REPORT", target: p.name, before, after: next, note: `From report ${stored.reportNo}${p.note ? ` — ${p.note}` : ""}` }));
+                t.history.push(auditRow({ by: WHL_BOT, action: "REPORT", target: p.name, before, after: next, note: `From report ${stored.reportNo}${p.note ? ` - ${p.note}` : ""}` }));
               }
               b.labEmails ??= [];
               b.labEmails.unshift({
                 id: uid("em"), direction: "IN", lotId, lotCode: l.lotCode, mpn: l.orderLineMpn,
-                workOrderNo: l.workOrderNo, poNo: l.clientPoNo, subject: `WHL Report ${stored.reportNo} — ${l.orderLineMpn} (Lot ${l.lotCode})`,
+                workOrderNo: l.workOrderNo, poNo: l.clientPoNo, subject: `WHL Report ${stored.reportNo} - ${l.orderLineMpn} (Lot ${l.lotCode})`,
                 body: `Report ${stored.reportNo} issued. Overall conclusion: ${stored.conclusion.replace(/_/g, " ")}${stored.anyFar ? " (one or more processes F.A.R.)" : ""}.`,
                 at: stamp(), by: "WHL Reports", status: "REPORT_DELIVERED", kind: "REPORT", attachments: [stored.fileName],
               });
@@ -784,14 +1000,14 @@ export const useStore = create<Store>()(
               });
             });
             const st = conclusionToLotStatus(rep.conclusion, rep.anyFar);
-            if (st === "PASS") toast.success(`${rep.reportNo} — Acceptable`);
-            else if (st === "FAIL") toast.error(`${rep.reportNo} — ${rep.conclusion.replace(/_/g, " ").toLowerCase()}`);
-            else toast.warning(`${rep.reportNo} — Acceptable, but a process came back F.A.R.`);
+            if (st === "PASS") toast.success(`${rep.reportNo} - Acceptable`);
+            else if (st === "FAIL") toast.error(`${rep.reportNo} - ${rep.conclusion.replace(/_/g, " ").toLowerCase()}`);
+            else toast.warning(`${rep.reportNo} - Acceptable, but a process came back F.A.R.`);
           } catch (e) { toast.error(`WHL: ${errMsg(e)}`); }
         })();
       },
 
-      // Pre-mapped chase — no looking up WHL's address or the work-order number by hand.
+      // Pre-mapped chase - no looking up WHL's address or the work-order number by hand.
       requestWhlUpdate: (orderId, lotId) => {
         const b0 = get().orders[orderId]; if (!b0) return;
         const lot = b0.lots.find((x) => x.id === lotId); if (!lot) return;
@@ -821,9 +1037,9 @@ export const useStore = create<Store>()(
         void (async () => {
           try {
             await whlSendMail({ to: WHL_CONTACT, subject: m.subject, body: m.body, workOrderNo: lot?.workOrderNo, lotCode: lot?.lotCode, mpn: lot?.orderLineMpn, poNo: lot?.clientPoNo });
-            toast.success("Email sent to WHL — logged against the lot");
+            toast.success("Email sent to WHL - logged against the lot");
           } catch (e) {
-            set((s) => { const em = s.orders[orderId]?.labEmails?.find((x) => x.id === emId); if (em) { em.status = "ESCALATED"; em.matchNote = `Send failed — ${errMsg(e)}. Retry.`; } });
+            set((s) => { const em = s.orders[orderId]?.labEmails?.find((x) => x.id === emId); if (em) { em.status = "ESCALATED"; em.matchNote = `Send failed - ${errMsg(e)}. Retry.`; } });
             toast.error(`Mail: ${errMsg(e)}`);
           }
         })();
@@ -936,7 +1152,7 @@ export const useStore = create<Store>()(
         toast.warning("Thread marked escalated");
       },
 
-      // Reports carry NDA language — every view/download is logged, internal-only.
+      // Reports carry NDA language - every view/download is logged, internal-only.
       logReportAccess: (orderId, lotId, reportId, action) => {
         set((s) => {
           const r = s.orders[orderId]?.lots.find((x) => x.id === lotId)?.reports?.find((x) => x.id === reportId);
@@ -951,7 +1167,7 @@ export const useStore = create<Store>()(
           const r = lot.reports?.find((x) => x.id === reportId); if (!r) return;
           const before = r.clientPo;
           const onFile = lot.clientPoNo ?? b.sourcingAllocations.find((a) => a.orderLineMpn === lot.orderLineMpn)?.clientPoNo;
-          if (!onFile) { toast.error("No client PO on file for this lot — map it on the Allocations tab first."); return; }
+          if (!onFile) { toast.error("No client PO on file for this lot - map it on the Allocations tab first."); return; }
           r.clientPo = onFile;
           r.parseFlags = r.parseFlags.filter((f) => !f.toLowerCase().includes("client p/o"));
           const spec = (b.mpnTests ?? []).find((x) => x.mpn === lot.orderLineMpn);
@@ -960,7 +1176,7 @@ export const useStore = create<Store>()(
         toast.success("Client P/O reconciled");
       },
 
-      // "Result is in — who do we tell." One action per counterparty; the report PDF rides
+      // "Result is in - who do we tell." One action per counterparty; the report PDF rides
       // along when the operator ticks it. Escrow notifications also land on the escrow ledger.
       notifyLotResult: (orderId, lotId, m) => {
         const b0 = get().orders[orderId]; if (!b0) return;
@@ -972,8 +1188,8 @@ export const useStore = create<Store>()(
           ? (m.attachReport && inv ? [inv.fileName] : [])
           : (m.attachReport && rep ? [rep.fileName] : []);
         const noteFor: Record<NotifyParty, string> = {
-          SUPPLIER: "Masked — buyer identity, client PO and sell price withheld.",
-          BUYER: "Masked — supplier identity, buy price and inbound AWB withheld.",
+          SUPPLIER: "Masked - buyer identity, client PO and sell price withheld.",
+          BUYER: "Masked - supplier identity, buy price and inbound AWB withheld.",
           ESCROW: "Release-trigger evidence for the escrow provider.",
           WHL: "Acknowledgement to the laboratory.",
           FINANCE: "Internal — lab testing fee for payment. Booked to the order, not the supplier's material payment.",
@@ -1032,7 +1248,7 @@ export const useStore = create<Store>()(
           } catch (e) {
             set((s) => {
               const n = s.orders[orderId]?.lots.find((x) => x.id === lotId)?.notifications?.find((x) => x.id === nId);
-              if (n) { n.status = "FAILED"; n.note = `Send failed — ${errMsg(e)}. Retry.`; }
+              if (n) { n.status = "FAILED"; n.note = `Send failed - ${errMsg(e)}. Retry.`; }
             });
             toast.error(`Notify: ${errMsg(e)}`);
           }
@@ -1110,7 +1326,7 @@ export const useStore = create<Store>()(
               const bb = s.orders[orderId]; if (!bb) return;
               for (const { lotId, id: nId } of nIds) {
                 const n = bb.lots.find((x) => x.id === lotId)?.notifications?.find((x) => x.id === nId);
-                if (n) { n.status = "FAILED"; n.note = `Send failed — ${errMsg(e)}. Retry.`; }
+                if (n) { n.status = "FAILED"; n.note = `Send failed - ${errMsg(e)}. Retry.`; }
               }
             });
             toast.error(`Notify: ${errMsg(e)}`);
@@ -1122,13 +1338,13 @@ export const useStore = create<Store>()(
         const st = get();
         const b = st.orders[orderId]; if (!b) return false;
         // masked part trade: you can only fulfil demand for part X with part X
-        if (a.clientLineMpn !== a.orderLineMpn) { toast.error(`Can't map ${a.orderLineMpn} to a ${a.clientLineMpn} demand line — parts must match.`); return false; }
+        if (a.clientLineMpn !== a.orderLineMpn) { toast.error(`Can't map ${a.orderLineMpn} to a ${a.clientLineMpn} demand line - parts must match.`); return false; }
         const line = b.lines.find((l) => l.id === a.orderLineId);
         const orderUnmapped = line ? line.quantity - mappedForOrderLine(b, line) : 0;
         const demand = st.clientPos.find((c) => c.clientPoNo === a.clientPoNo)?.lines.find((l) => l.mpn === a.clientLineMpn)?.qty ?? 0;
         const clientRemaining = demand - sourcedForClientLine(st.supplierPos, st.orders, a.clientPoNo, a.clientLineMpn);
         const cap = Math.min(orderUnmapped, clientRemaining);
-        if (a.qty <= 0 || a.qty > cap) { toast.error(`Qty 1–${Math.max(0, cap)} (order-line unmapped ${Math.max(0, orderUnmapped)}, client remaining ${Math.max(0, clientRemaining)}).`); return false; }
+        if (a.qty <= 0 || a.qty > cap) { toast.error(`Qty 1-${Math.max(0, cap)} (order-line unmapped ${Math.max(0, orderUnmapped)}, client remaining ${Math.max(0, clientRemaining)}).`); return false; }
         const priceFor = (poNo: string, mpn: string) => st.clientPos.find((c) => c.clientPoNo === poNo)?.lines.find((l) => l.mpn === mpn)?.unitPrice ?? 0;
         set((s) => {
           const bb = s.orders[orderId]; if (!bb) return;
@@ -1142,7 +1358,7 @@ export const useStore = create<Store>()(
             sell += Math.max(0, l.quantity - mappedQty) * l.unitPrice; // still-unmapped qty valued at buy (0 margin)
           }
           bb.sellTotal = Math.round(sell);
-          const names = new Set(bb.sourcingAllocations.map((x) => st.clientPos.find((c) => c.clientPoNo === x.clientPoNo)?.client.name ?? "—"));
+          const names = new Set(bb.sourcingAllocations.map((x) => st.clientPos.find((c) => c.clientPoNo === x.clientPoNo)?.client.name ?? "-"));
           bb.buyer = { ...bb.buyer, name: names.size === 0 ? "Unlinked (map later)" : names.size === 1 ? [...names][0] : "Multiple clients" };
         });
         toast.success(`Mapped ${a.qty} → ${a.clientPoNo}`);
@@ -1442,7 +1658,7 @@ export const useStore = create<Store>()(
             toast.success(`T/T initiated (${ack.providerRef})`);
             const cleared = await bankGetTransferStatus(ack.providerRef, p0.amount);
             set((s) => { const p = s.orders[orderId]?.payments.find((x) => x.id === payId); if (p) { p.status = cleared.status === "CLEARED" ? "PAID" : "CANCELLED"; if (cleared.status === "CLEARED") { p.paidAt = today(); p.utr = cleared.utr; } } });
-            toast.success(cleared.status === "CLEARED" ? `Cleared — UTR ${cleared.utr}` : "Transfer returned");
+            toast.success(cleared.status === "CLEARED" ? `Cleared - UTR ${cleared.utr}` : "Transfer returned");
           } catch (e) { toast.error(`Banking: ${errMsg(e)}`); }
         })();
       },
@@ -1511,7 +1727,7 @@ export const useStore = create<Store>()(
               const c = s.orders[orderId]?.customs.find((x) => x.shipmentNo === e.shipmentNo);
               if (c) { c.beNo = filed.beNo; c.beDate = filed.beDate; c.totalDuty = assessed.duty.totalDuty; c.icegateRef = cleared.icegateRef; c.filedAt = cleared.oocDate; }
             });
-            toast.success(`BOE ${filed.beNo} cleared — ICEGATE ${cleared.icegateRef}`);
+            toast.success(`BOE ${filed.beNo} cleared - ICEGATE ${cleared.icegateRef}`);
           } catch (err) { toast.error(`ICEGATE: ${errMsg(err)}`); }
         })();
       },
@@ -1520,11 +1736,11 @@ export const useStore = create<Store>()(
         const b = get().orders[orderId]; if (!b) return false;
         // segregation guard: only deliver to a client line THIS order actually sourced, and never past what it owes
         const committed = orderSourcedForClient(b, a.clientPoNo, a.clientLineMpn);
-        if (committed <= 0) { toast.error(`This order didn't source ${a.clientLineMpn} for ${a.clientPoNo} — map it first (Allocations tab).`); return false; }
+        if (committed <= 0) { toast.error(`This order didn't source ${a.clientLineMpn} for ${a.clientPoNo} - map it first (Allocations tab).`); return false; }
         const physical = remainingToAllocate(b, a.clientLineMpn);
         const clientRemaining = committed - deliveredForClientLine(b, a.clientPoNo, a.clientLineMpn);
         const cap = Math.min(physical, clientRemaining);
-        if (a.qty <= 0 || a.qty > cap) { toast.error(`Qty 1–${Math.max(0, cap)} (received ${physical}, still owed to this client ${Math.max(0, clientRemaining)}).`); return false; }
+        if (a.qty <= 0 || a.qty > cap) { toast.error(`Qty 1-${Math.max(0, cap)} (received ${physical}, still owed to this client ${Math.max(0, clientRemaining)}).`); return false; }
         set((s) => { s.orders[orderId]?.deliveries.push({ id: uid("da"), fromShipmentNo: a.fromShipmentNo, clientPoNo: a.clientPoNo, clientLineMpn: a.clientLineMpn, qty: a.qty, decidedBy: "You (demo)", decidedAt: today() }); });
         toast.success(`Allocated ${a.qty} → ${a.clientPoNo}`);
         return true;
@@ -1534,7 +1750,7 @@ export const useStore = create<Store>()(
         toast.success("Proof of delivery recorded");
       },
 
-      // GST e-Invoice / IRP adapter. Seller is ALWAYS the masking entity — supplier is never sent.
+      // GST e-Invoice / IRP adapter. Seller is ALWAYS the masking entity - supplier is never sent.
       generateEInvoice: (orderId) => {
         const b = get().orders[orderId]; if (!b) return;
         if (b.einvoice?.irn) { toast("IRN already generated for this order"); return; }
@@ -1564,7 +1780,7 @@ export const useStore = create<Store>()(
           if (b.supplierPoId) { const spo = s.supplierPos.find((x) => x.id === b.supplierPoId); if (spo) { spo.status = "DRAFT"; spo.orderId = undefined; } }
           b.events.unshift({ id: uid("ev"), eventType: "GENERAL", message: "Order cancelled; supplier PO released back to draft.", source: "SC_MANUAL", occurredAt: today(), recordedBy: "You (demo)" });
         });
-        toast.success("Order cancelled — supplier PO released to draft");
+        toast.success("Order cancelled - supplier PO released to draft");
       },
 
       addEvent: (orderId, e) => { set((s) => { s.orders[orderId]?.events.unshift({ id: uid("ev"), eventType: e.eventType, message: e.message, source: "SC_MANUAL", occurredAt: today(), recordedBy: "You (demo)" }); }); toast.success("Event logged"); },
@@ -1586,7 +1802,7 @@ export const useStore = create<Store>()(
             a.status = status; a.decidedBy = "You (demo)";
             if (a.kind === "PO_REVIEW" && status === "APPROVED") {
               b.approvalStatus = "APPROVED";
-              // auto-advance the "PO reviewed & approved" gate — approving IS the action, no separate Advance click
+              // auto-advance the "PO reviewed & approved" gate - approving IS the action, no separate Advance click
               const idx = b.journey.findIndex((x) => (x.status === "IN_PROGRESS" || x.status === "BLOCKED") && x.name.toLowerCase().includes("approved"));
               if (idx >= 0) {
                 b.journey[idx].status = "DONE";
@@ -1598,14 +1814,618 @@ export const useStore = create<Store>()(
             if (a.kind === "PO_REVIEW" && status === "REJECTED") b.approvalStatus = "REJECTED";
           }
         });
-        toast.success(nextName ? `PO approved — advanced to “${nextName}”` : `Approval ${status.toLowerCase()}`);
+        toast.success(nextName ? `PO approved - advanced to "${nextName}"` : `Approval ${status.toLowerCase()}`);
+      },
+
+      // ---- RFQ Module Actions ----
+      createDemandLine: (input) => {
+        const id = uid("dem");
+        set((s) => {
+          s.demandLines[id] = {
+            id, mpn: input.mpn, qty: input.qty, targetPrice: input.targetPrice, currency: input.currency,
+            requiredByDate: input.requiredByDate, source: input.source as "email" | "manual" | "portal",
+            clientPoId: input.clientPoId, clientLineId: input.clientLineId, createdAt: today(),
+          };
+        });
+        toast.success(`Demand ${input.mpn} · Qty ${input.qty} created`);
+        return id;
+      },
+
+      createRfqBundle: (input) => {
+        const st = get();
+        // Guard: validate bundling (sum of RfqLines ≤ demand qty for each demand)
+        for (const demandLineId of input.demandLineIds) {
+          const demand = st.demandLines[demandLineId];
+          if (!demand) { toast.error(`Demand line ${demandLineId} not found`); return null; }
+        }
+        const bundleId = uid("rfq");
+        const now = today();
+        const deadlineDate = new Date(input.deadline);
+        set((s) => {
+          const rfqLines = input.demandLineIds.map((id, i) => {
+            const demand = s.demandLines[id];
+            return {
+              id: uid("rlin"),
+              rfqBundleId: bundleId,
+              demandLineIds: [id],
+              mpn: demand?.mpn || "-",
+              alternateGroupId: `alt-${demand?.mpn || "unknown"}`,
+              aggregatedQty: demand?.qty || 0,
+              targetPrice: demand?.targetPrice || 0,
+              currency: demand?.currency || "USD",
+              clientPoId: demand?.clientPoId,
+              clientLineIds: demand?.clientLineId ? [demand.clientLineId] : [],
+            };
+          });
+          s.rfqBundles[bundleId] = {
+            id: bundleId,
+            lines: rfqLines,
+            invites: input.supplierEmails.map((email) => ({
+              id: uid("inv"),
+              rfqBundleId: bundleId,
+              supplierName: SUPPLIERS.find((sup) => sup.email?.toLowerCase() === email.toLowerCase())?.name ?? email,
+              supplierEmail: email,
+              status: "PENDING" as const,
+              portalToken: uid("tok"),
+              expiresAt: new Date(deadlineDate.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
+            })),
+            status: "DRAFT" as RfqBundleStatus,
+            deadline: input.deadline,
+            dateToleranceDays: input.dateToleranceDays,
+            createdAt: now,
+          };
+        });
+        toast.success(`RFQ Bundle ${bundleId} created with ${input.demandLineIds.length} line(s)`);
+        return bundleId;
+      },
+
+      floatRfqToSuppliers: async (bundleId) => {
+        const st = get();
+        const bundle = st.rfqBundles[bundleId];
+        if (!bundle) { toast.error(`Bundle ${bundleId} not found`); return false; }
+
+        const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
+        let sentCount = 0;
+        const results = await Promise.all(
+          bundle.invites.map((invite) =>
+            sendRfqInvite({
+              supplierEmail: invite.supplierEmail,
+              supplierName: invite.supplierName,
+              rfqBundleId: bundleId,
+              portalLink: `${baseUrl}/portal/rfq/${bundleId}/${invite.portalToken}`,
+              deadline: bundle.deadline,
+              lineCount: bundle.lines.length,
+            }).then((res) => ({ inviteId: invite.id, res })),
+          ),
+        );
+
+        set((s) => {
+          for (const { inviteId, res } of results) {
+            const inv = s.rfqBundles[bundleId]!.invites.find((i) => i.id === inviteId);
+            if (!inv) continue;
+            if (res.sent) {
+              inv.status = "SENT";
+              inv.sentAt = today();
+              sentCount++;
+            } else {
+              inv.lastError = res.error;
+            }
+          }
+          s.rfqBundles[bundleId]!.status = "FLOATED";
+        });
+
+        const failedCount = bundle.invites.length - sentCount;
+        if (failedCount > 0) {
+          toast.warning(`RFQ sent to ${sentCount}/${bundle.invites.length} supplier(s) — ${failedCount} failed`);
+        } else {
+          toast.success(`RFQ Bundle sent to ${sentCount} supplier(s)`);
+        }
+        return true;
+      },
+
+      resendSupplierInvite: async (bundleId, inviteId) => {
+        const st = get();
+        const bundle = st.rfqBundles[bundleId];
+        const invite = bundle?.invites.find((i) => i.id === inviteId);
+        if (!bundle || !invite) { toast.error(`Invite not found`); return false; }
+
+        const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
+        const res = await sendRfqInvite({
+          supplierEmail: invite.supplierEmail,
+          supplierName: invite.supplierName,
+          rfqBundleId: bundleId,
+          portalLink: `${baseUrl}/portal/rfq/${bundleId}/${invite.portalToken}`,
+          deadline: bundle.deadline,
+          lineCount: bundle.lines.length,
+        });
+
+        set((s) => {
+          const inv = s.rfqBundles[bundleId]!.invites.find((i) => i.id === inviteId);
+          if (!inv) return;
+          if (res.sent) {
+            if (inv.status === "PENDING" || inv.status === "SENT") inv.status = "SENT";
+            inv.sentAt = today();
+            inv.lastError = undefined;
+          } else {
+            inv.lastError = res.error;
+          }
+        });
+
+        if (res.sent) toast.success(`Resent to ${invite.supplierName}`);
+        else toast.error(`Resend to ${invite.supplierName} failed: ${res.error}`);
+        return res.sent;
+      },
+
+      markInviteViewed: (bundleId, portalToken) => {
+        set((s) => {
+          const invite = s.rfqBundles[bundleId]?.invites.find((i) => i.portalToken === portalToken);
+          if (invite && invite.status !== "QUOTED" && invite.status !== "DECLINED") {
+            if (invite.status !== "VIEWED") invite.status = "VIEWED";
+            invite.viewedAt = today();
+          }
+        });
+      },
+
+      askSupplierQuestion: (bundleId, portalToken, question) => {
+        set((s) => {
+          const invite = s.rfqBundles[bundleId]?.invites.find((i) => i.portalToken === portalToken);
+          if (!invite) return;
+          if (!invite.questions) invite.questions = [];
+          invite.questions.push({ id: uid("q"), question, askedAt: today() });
+        });
+        toast.success(`Question sent to Sharpbuy sourcing`);
+      },
+
+      answerSupplierQuestion: (bundleId, inviteId, questionId, answer) => {
+        set((s) => {
+          const invite = s.rfqBundles[bundleId]?.invites.find((i) => i.id === inviteId);
+          const q = invite?.questions?.find((x) => x.id === questionId);
+          if (q) { q.answer = answer; q.answeredAt = today(); }
+        });
+        toast.success(`Answer sent to supplier`);
+      },
+
+      submitSupplierQuote: (input) => {
+        const quoteId = uid("quote");
+        set((s) => {
+          s.supplierQuotes[quoteId] = {
+            id: quoteId,
+            rfqBundleId: input.rfqBundleId,
+            supplierEmail: input.supplierEmail,
+            lines: input.lines.map((l: any) => ({
+              id: l.id || uid("ql"),
+              rfqLineId: l.rfqLineId,
+              supplierEmail: input.supplierEmail,
+              quotedMpn: l.quotedMpn,
+              stockQty: l.stockQty ?? 0,
+              unitPrice: l.unitPrice ?? 0,
+              currency: l.currency || "USD",
+              leadTimeDays: l.leadTimeDays ?? 7,
+              leadTimeUnit: l.leadTimeUnit || "days",
+              incoterm: l.incoterm || "EXW",
+              location: l.location || "",
+              packaging: l.packaging || "Tape & Reel",
+              validityDays: l.validityDays ?? 30,
+              moq: l.moq ?? 1,
+              spq: l.spq ?? 1,
+              dateCode: l.dateCode || "",
+              termsConditions: l.termsConditions || [],
+              stockSource: l.stockSource || "warehouse",
+              paymentTerms: l.paymentTerms || "Advance via T/T",
+              status: "ACTIVE" as const,
+            })),
+            status: "SUBMITTED" as const,
+            submittedAt: today(),
+          };
+          s.rfqBundles[input.rfqBundleId]!.status = "QUOTES_IN";
+          const invite = s.rfqBundles[input.rfqBundleId]!.invites.find((i) => i.supplierEmail === input.supplierEmail);
+          if (invite) invite.status = "QUOTED";
+        });
+        toast.success(`Quote from ${input.supplierEmail} submitted`);
+        return quoteId;
+      },
+
+      matchQuoteEmail: (bundleId, emailId, rfqLineId) => {
+        const st = get();
+        const email = st.quoteEmails[emailId];
+        if (!email) { toast.error(`Email ${emailId} not found`); return false; }
+        set((s) => {
+          s.quoteEmails[emailId]!.matchedSupplierQuoteId = uid("quote");
+          s.quoteEmails[emailId]!.status = "MATCHED";
+        });
+        toast.success(`Quote email matched to RfqLine`);
+        return true;
+      },
+
+      syncQuoteInbox: async (bundleId) => {
+        // Mock: return matched and unmatched counts
+        const st = get();
+        const emails = Object.values(st.quoteEmails).filter((e) => e.rfqBundleId === bundleId);
+        const matched = emails.filter((e) => e.status === "MATCHED").length;
+        const unmatched = emails.filter((e) => e.status === "UNMATCHED").length;
+        toast.success(`Inbox: ${matched} matched, ${unmatched} unmatched`);
+        return { matched, unmatched };
+      },
+
+      createClientQuoteDecision: (input) => {
+        const st = get();
+        const bundle = st.rfqBundles[input.rfqBundleId];
+        if (!bundle) { toast.error("Bundle not found"); return null; }
+
+        const decisionId = uid("cqd");
+        const selectedLines = input.selectedQuoteLineIds.map((quoteLineId) => {
+          for (const sq of Object.values(st.supplierQuotes)) {
+            const line = sq.lines.find((l) => l.id === quoteLineId);
+            if (line) {
+              const rfqLine = bundle.lines.find((rl) => rl.id === line.rfqLineId);
+              if (rfqLine) return { rfqLineId: rfqLine.id, quoteLineId };
+            }
+          }
+          return { rfqLineId: "", quoteLineId };
+        });
+
+        const allocations: { rfqLineId: string; clientPoId: string; qty: number; unitPrice: number }[] = [];
+        for (const selection of selectedLines) {
+          const rfqLine = bundle.lines.find((l) => l.id === selection.rfqLineId);
+          if (rfqLine) {
+            for (const sq of Object.values(st.supplierQuotes)) {
+              const quoteLine = sq.lines.find((l) => l.id === selection.quoteLineId);
+              if (quoteLine && rfqLine.clientPoId) {
+                allocations.push({
+                  rfqLineId: rfqLine.id,
+                  clientPoId: rfqLine.clientPoId,
+                  qty: quoteLine.stockQty || rfqLine.aggregatedQty,
+                  unitPrice: quoteLine.unitPrice,
+                });
+              }
+            }
+          }
+        }
+
+        set((s) => {
+          s.clientQuoteDecisions[decisionId] = {
+            id: decisionId,
+            rfqBundleId: input.rfqBundleId,
+            selectedQuoteLines: selectedLines,
+            allocations,
+            markupPercent: input.markupPercent,
+            status: "DRAFT" as const,
+            createdAt: today(),
+          };
+        });
+        toast.success(`Quote Decision created with ${input.selectedQuoteLineIds.length} quotes & allocations`);
+        return decisionId;
+      },
+
+      submitQuoteForApproval: (bundleId) => {
+        const st = get();
+        const decision = Object.values(st.clientQuoteDecisions).find((d) => d.rfqBundleId === bundleId);
+        if (!decision) { toast.error("No decision found for this bundle"); return ""; }
+        const approvalId = uid("app");
+        set((s) => {
+          s.clientQuoteDecisions[decision.id]!.status = "PENDING_APPROVAL" as const;
+          s.clientQuoteDecisions[decision.id]!.approvalId = approvalId;
+          s.rfqBundles[bundleId]!.status = "DECISION_PENDING";
+        });
+        toast.success(`Quote Decision submitted for Finance approval`);
+        return approvalId;
+      },
+
+      approveQuoteDecision: async (decisionId) => {
+        const st = get();
+        const decision = st.clientQuoteDecisions[decisionId];
+        if (!decision) { toast.error(`Decision not found`); return; }
+        set((s) => {
+          s.clientQuoteDecisions[decisionId]!.status = "APPROVED";
+          s.clientQuoteDecisions[decisionId]!.decidedBy = "You (Finance, demo)";
+          s.clientQuoteDecisions[decisionId]!.decidedAt = today();
+        });
+        toast.success(`Quote decision approved`);
+        await get().sendClientQuote(decision.rfqBundleId);
+      },
+
+      rejectQuoteDecision: (decisionId, reason) => {
+        const st = get();
+        const decision = st.clientQuoteDecisions[decisionId];
+        if (!decision) { toast.error(`Decision not found`); return; }
+        if (!reason.trim()) { toast.error(`A rejection reason is required`); return; }
+        set((s) => {
+          s.clientQuoteDecisions[decisionId]!.status = "REJECTED";
+          s.clientQuoteDecisions[decisionId]!.decidedBy = "You (Finance, demo)";
+          s.clientQuoteDecisions[decisionId]!.decidedAt = today();
+          s.clientQuoteDecisions[decisionId]!.rejectionReason = reason;
+        });
+        toast(`Quote decision rejected`);
+      },
+
+      submitCounterOffer: (bundleId, quoteLineId, price, notes) => {
+        const st = get();
+        const quotes = Object.values(st.supplierQuotes).filter((q) => q.rfqBundleId === bundleId);
+        let found = false;
+        for (const quote of quotes) {
+          const line = quote.lines.find((l) => l.id === quoteLineId);
+          if (line) {
+            // Guard: price bounds 0 ≤ counter ≤ original × 150%
+            const original = line.unitPrice;
+            if (price < 0 || price > original * 1.5) {
+              toast.error(`Counter price out of bounds (0-${(original * 1.5).toFixed(2)})`);
+              return false;
+            }
+            // Guard: not locked post-approval
+            const decision = Object.values(st.clientQuoteDecisions).find((d) => d.rfqBundleId === bundleId && d.status === "APPROVED");
+            if (decision && decision.selectedQuoteLines.some((s) => s.quoteLineId === quoteLineId)) {
+              toast.error(`Cannot counter accepted quote`);
+              return false;
+            }
+            found = true;
+            break;
+          }
+        }
+        if (!found) { toast.error(`Quote line not found`); return false; }
+        set((s) => {
+          for (const quote of Object.values(s.supplierQuotes).filter((q) => q.rfqBundleId === bundleId)) {
+            const line = quote.lines.find((l) => l.id === quoteLineId);
+            if (line) line.status = "COUNTER_PENDING";
+          }
+        });
+        toast.success(`Counter-offer sent: ${price.toFixed(2)}`);
+        return true;
+      },
+
+      recordSupplierCounter: (bundleId, quoteLineId, price) => {
+        set((s) => {
+          for (const quote of Object.values(s.supplierQuotes).filter((q) => q.rfqBundleId === bundleId)) {
+            const line = quote.lines.find((l) => l.id === quoteLineId);
+            if (line) line.status = "COUNTER_RESPONSE";
+          }
+        });
+        toast.success(`Supplier counter recorded: ${price.toFixed(2)}`);
+      },
+
+      requestQuoteClarification: async (bundleId, quoteLineId, ambiguityType) => {
+        await new Promise((r) => setTimeout(r, 500));
+        toast.success(`Clarification request sent`);
+      },
+
+      sendClientQuote: async (bundleId) => {
+        const st = get();
+        const bundle = st.rfqBundles[bundleId];
+        const decision = Object.values(st.clientQuoteDecisions).find((d) => d.rfqBundleId === bundleId && d.status === "APPROVED");
+        if (!bundle || !decision) { toast.error(`Bundle or approved decision not found`); return false; }
+
+        const clientQuoteIds: string[] = [];
+        const quotesByClient = new Map<string, { name: string; email: string; lines: { rfqLineId: string; mpn: string; qty: number; unitPrice: number }[]; total: number }>();
+
+        for (const alloc of decision.allocations) {
+          const buyerEntry = BUYERS.find((b) => b.id === alloc.clientPoId);
+          if (!buyerEntry) continue;
+          const rfqLine = bundle.lines.find((l) => l.id === alloc.rfqLineId);
+          if (!rfqLine) continue;
+
+          if (!quotesByClient.has(alloc.clientPoId)) {
+            quotesByClient.set(alloc.clientPoId, {
+              name: buyerEntry.name,
+              email: buyerEntry.email || "buyer@example.com",
+              lines: [],
+              total: 0,
+            });
+          }
+          const clientData = quotesByClient.get(alloc.clientPoId)!;
+          const clientPrice = alloc.unitPrice * (1 + decision.markupPercent / 100);
+          const lineTotal = alloc.qty * clientPrice;
+
+          clientData.lines.push({
+            rfqLineId: rfqLine.id,
+            mpn: rfqLine.mpn,
+            qty: alloc.qty,
+            unitPrice: clientPrice,
+          });
+          clientData.total += lineTotal;
+        }
+
+        set((s) => {
+          let piSeq = 0;
+          for (const [clientPoId, data] of quotesByClient.entries()) {
+            const quoteId = uid("cq");
+            piSeq++;
+            s.clientQuotes[quoteId] = {
+              id: quoteId,
+              rfqBundleId: bundleId,
+              clientQuoteDecisionId: decision.id,
+              clientPoId,
+              piNo: `PI-${bundleId.slice(-6).toUpperCase()}-${piSeq}`,
+              clientName: data.name,
+              clientEmail: data.email,
+              token: uid("token").substring(0, 12),
+              lines: data.lines,
+              totalPrice: data.total,
+              expiresAt: addDays(today(), 7),
+              status: "PENDING" as const,
+              createdAt: today(),
+            };
+            clientQuoteIds.push(quoteId);
+          }
+          s.rfqBundles[bundleId]!.status = "CLIENT_QUOTE_SENT";
+          s.clientQuoteDecisions[decision.id]!.sentAt = today();
+        });
+        toast.success(`${clientQuoteIds.length} client quote(s) created & sent (PI issued)`);
+        return true;
+      },
+
+      acceptClientQuote: async (clientQuoteId) => {
+        const st = get();
+        const quote = st.clientQuotes[clientQuoteId];
+        if (!quote) { toast.error(`Quote not found`); return; }
+        const decision = st.clientQuoteDecisions[quote.clientQuoteDecisionId];
+        if (!decision) { toast.error(`Decision not found`); return; }
+
+        const poNo = "CPO_" + crypto.getRandomValues(new Uint8Array(4)).reduce((acc, v) => acc + v.toString(16).padStart(2, "0"), "");
+
+        set((s) => {
+          s.clientQuotes[clientQuoteId]!.status = "ACCEPTED";
+          s.clientQuotes[clientQuoteId]!.acceptedAt = today();
+
+          const existingCpo = s.clientPos.find((c) => c.clientPoNo === quote.clientPoId);
+          if (existingCpo) {
+            existingCpo.terms = { ...existingCpo.terms, referenceNo: quote.piNo };
+            existingCpo.lines = quote.lines.map((l) => ({
+              mpn: l.mpn,
+              make: "",
+              dateCode: "",
+              qty: l.qty,
+              unitPrice: l.unitPrice,
+              requiredBy: addDays(today(), 30),
+              status: "DRAFT",
+            }));
+          } else {
+            const newClientPo: typeof s.clientPos[0] = {
+              id: uid("cpo"),
+              clientPoNo: poNo,
+              client: { name: quote.clientName, country: "IN", gstin: "", state: "" },
+              paymentMode: "CREDIT",
+              status: "DRAFT",
+              terms: { referenceNo: quote.piNo }, // this PO is raised against our PI to the client
+              deliveryAddress: { city: "", state: "", country: "IN" },
+              lines: quote.lines.map((l) => ({
+                mpn: l.mpn,
+                make: "",
+                dateCode: "",
+                qty: l.qty,
+                unitPrice: l.unitPrice,
+                requiredBy: addDays(today(), 30),
+                status: "DRAFT",
+              })),
+            };
+            s.clientPos.push(newClientPo);
+          }
+        });
+
+        const created = st.finalizeRfqToSupplierPos(decision.rfqBundleId);
+        if (created && created.pending.length > 0) {
+          toast.success(`Quote accepted (against PI ${quote.piNo}). ClientPO created — ${created.poIds.length} SupplierPO(s) created, ${created.pending.length} supplier(s) still awaiting their PI.`);
+        } else {
+          toast.success(`Quote accepted (against PI ${quote.piNo}). ClientPO + SupplierPO(s) created.`);
+        }
+      },
+
+      declineClientQuote: (clientQuoteId) => {
+        const st = get();
+        const quote = st.clientQuotes[clientQuoteId];
+        if (!quote) { toast.error(`Quote not found`); return; }
+        set((s) => { s.clientQuotes[clientQuoteId]!.status = "WITHDRAWN"; });
+        toast(`Quote declined`);
+      },
+
+      requestQuoteChanges: (clientQuoteId, notes) => {
+        const st = get();
+        const quote = st.clientQuotes[clientQuoteId];
+        if (!quote) { toast.error(`Quote not found`); return; }
+        set((s) => {
+          s.clientQuotes[clientQuoteId]!.status = "CHANGE_REQUESTED";
+          s.clientQuotes[clientQuoteId]!.buyerNotes = notes || undefined;
+        });
+        toast(`Change request sent to Sharpbuy sourcing`);
+      },
+
+      recordSellerPi: (supplierQuoteId, piNo) => {
+        const st = get();
+        const quote = st.supplierQuotes[supplierQuoteId];
+        if (!quote) { toast.error(`Supplier quote not found`); return; }
+        if (!piNo.trim()) { toast.error(`PI number is required`); return; }
+        set((s) => {
+          s.supplierQuotes[supplierQuoteId]!.sellerPiNo = piNo.trim();
+          s.supplierQuotes[supplierQuoteId]!.sellerPiReceivedAt = today();
+        });
+        toast.success(`Seller PI ${piNo.trim()} recorded for ${quote.supplierEmail}`);
+      },
+
+      finalizeRfqToSupplierPos: (bundleId) => {
+        const st = get();
+        const bundle = st.rfqBundles[bundleId];
+        const decision = Object.values(st.clientQuoteDecisions).find((d) => d.rfqBundleId === bundleId && d.status === "APPROVED");
+        if (!bundle || !decision) { toast.error("Bundle or approved decision not found"); return null; }
+
+        type DraftLine = { mpn: string; qty: number; buyUnitPrice: number; leadTimeDays: number; clientPoNo?: string; clientLineMpn?: string };
+        const supplierPoMap = new Map<string, { supplierEmail: string; sellerPiNo: string; lines: DraftLine[] }>();
+        const pendingPi = new Set<string>(); // suppliers who won a line but haven't sent their PI yet
+
+        for (const selection of decision.selectedQuoteLines) {
+          const rfqLine = bundle.lines.find((l) => l.id === selection.rfqLineId);
+          if (!rfqLine) continue;
+          for (const sq of Object.values(st.supplierQuotes)) {
+            const quoteLine = sq.lines.find((l) => l.id === selection.quoteLineId);
+            if (!quoteLine) continue;
+
+            // gate: we don't cut our PO to a supplier until their PI is in hand
+            if (!sq.sellerPiNo) { pendingPi.add(sq.supplierEmail); continue; }
+
+            // idempotent per PI: this supplier's PO for this exact PI already exists → skip, don't duplicate
+            if (st.supplierPos.some((sp) => sp.terms?.referenceNo === sq.sellerPiNo)) continue;
+
+            if (!supplierPoMap.has(sq.supplierEmail)) {
+              supplierPoMap.set(sq.supplierEmail, { supplierEmail: sq.supplierEmail, sellerPiNo: sq.sellerPiNo, lines: [] });
+            }
+
+            // resolve the real ClientPO number if this buyer has already accepted (their ClientPO exists);
+            // otherwise the line ships unlinked, same as an uploaded supplier PO with no client match yet
+            const buyerEntry = rfqLine.clientPoId ? BUYERS.find((b) => b.id === rfqLine.clientPoId) : undefined;
+            const linkedCpo = buyerEntry
+              ? st.clientPos.find((c) => Object.values(st.clientQuotes).some((q) => q.clientPoId === rfqLine.clientPoId && q.piNo === c.terms?.referenceNo) && c.client.name === buyerEntry.name)
+              : undefined;
+
+            supplierPoMap.get(sq.supplierEmail)!.lines.push({
+              mpn: quoteLine.quotedMpn || rfqLine.mpn,
+              qty: quoteLine.stockQty || rfqLine.aggregatedQty,
+              buyUnitPrice: quoteLine.unitPrice,
+              leadTimeDays: quoteLine.leadTimeDays || 7,
+              clientPoNo: linkedCpo?.clientPoNo,
+              clientLineMpn: linkedCpo ? (quoteLine.quotedMpn || rfqLine.mpn) : undefined,
+            });
+          }
+        }
+
+        const poIds: string[] = [];
+        set((s) => {
+          for (const [supplierEmail, poData] of supplierPoMap.entries()) {
+            const supplierEntry = SUPPLIERS.find((sup) => sup.email === supplierEmail);
+            const id = uid("spo");
+            const poNo = `SPO-2026-${(300 + s.supplierPos.length).toString().padStart(4, "0")}`;
+            const buyTotal = poData.lines.reduce((a, l) => a + l.qty * l.buyUnitPrice, 0);
+            const spo: SupplierPO = {
+              id, poNo,
+              supplier: { name: supplierEntry?.name || supplierEmail, country: supplierEntry?.country || "-", gstin: supplierEntry?.gstin },
+              tradeType: supplierEntry?.country === "IN" ? "DOMESTIC" : "INTERNATIONAL",
+              currency: "USD", incoterm: "EXW", paymentMode: "ADVANCE", testing: "NONE",
+              leadTimeDays: Math.max(...poData.lines.map((l) => l.leadTimeDays), 7),
+              testingTimeDays: 0, deliveryTimeDays: 9,
+              terms: { referenceNo: poData.sellerPiNo, paymentMethod: "Advance via T/T" }, // this PO is raised against the supplier's PI
+              lines: poData.lines.map((l) => ({ mpn: l.mpn, qty: l.qty, buyUnitPrice: l.buyUnitPrice, marginPct: 0, clientPoNo: l.clientPoNo, clientLineMpn: l.clientLineMpn })),
+              buyTotal: Math.round(buyTotal), createdBy: "RFQ (auto)", createdAt: today(), status: "DRAFT",
+            };
+            s.supplierPos.unshift(spo);
+            poIds.push(id);
+          }
+          if (pendingPi.size === 0 && supplierPoMap.size > 0) {
+            s.rfqBundles[bundleId]!.status = "CLIENT_CONFIRMED";
+          }
+        });
+
+        const pending = Array.from(pendingPi);
+        if (poIds.length > 0) {
+          toast.success(`RFQ finalized → ${poIds.length} SupplierPO(s) created against seller PI`);
+        }
+        if (pending.length > 0) {
+          toast(`${pending.length} supplier(s) still need to send their PI before their PO can be cut`);
+        }
+        return { poIds, pending };
       },
     })),
     {
       name: "poc-sourceops",
       // 2 = 3-entity model · 3 = WHL testing · 4 = full hardcoded seed on every order ·
-      // 5-11 = escrow rebuild (8-state machine, milestones, checkEscrowInbox) · 12 = merged with the WHL testing module
-      version: 12,
+      // 5-11 = escrow rebuild (8-state machine, milestones, checkEscrowInbox) · 12 = merged with the WHL testing module ·
+      // 13 = merged with the RFQ module (client intake → PO, PI-gated approvals)
+      version: 13,
       storage: createJSONStorage(() => (typeof window !== "undefined" ? window.localStorage : (undefined as unknown as Storage))),
       skipHydration: true,
       // No real migration path across these schema jumps — discard on a version bump rather than
@@ -1613,8 +2433,8 @@ export const useStore = create<Store>()(
       // an explicit choice instead of zustand logging its own "couldn't be migrated" console.error.
       migrate: () => undefined,
       merge: (persisted, current) => {
-        const p = persisted as { orders?: Record<string, unknown>; clientPos?: Store["clientPos"]; supplierPos?: SupplierPO[] } | undefined;
-        // pre-refactor blobs have `orders` but no `supplierPos` — discard rather than half-merge seed data on top of stale orders
+        const p = persisted as Partial<Store> | undefined;
+        // pre-refactor blobs have `orders` but no `supplierPos` - discard rather than half-merge seed data on top of stale orders
         if (!p || !p.orders || !p.supplierPos) return current;
         const orders: OrdersMap = {};
         for (const [id, b] of Object.entries(p.orders)) orders[id] = normalizeBundle(b);
@@ -1622,6 +2442,12 @@ export const useStore = create<Store>()(
           ...current, orders,
           clientPos: (p.clientPos ?? current.clientPos).map((c) => ({ ...c, lines: c.lines ?? [] })),
           supplierPos: p.supplierPos.map((s) => ({ ...s, lines: s.lines ?? [] })),
+          demandLines: p.demandLines ?? current.demandLines,
+          rfqBundles: p.rfqBundles ?? current.rfqBundles,
+          quoteEmails: p.quoteEmails ?? current.quoteEmails,
+          clientQuoteDecisions: p.clientQuoteDecisions ?? current.clientQuoteDecisions,
+          clientQuotes: p.clientQuotes ?? current.clientQuotes,
+          supplierQuotes: p.supplierQuotes ?? current.supplierQuotes,
         };
       },
     },

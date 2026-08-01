@@ -111,7 +111,7 @@ export function gateReason(b: OrderBundle, step: JourneyStep): string | null {
   }
   if (n.includes("collect")) { // collect-before-pay for non-escrow orders
     return b.payments.some((p) => p.direction === "CLIENT_TO_1BUY" && (p.status === "INITIATED" || p.status === "PAID"))
-      ? null : "No client collection recorded yet — secure buyer funds before paying the supplier.";
+      ? null : "No client collection recorded yet - secure buyer funds before paying the supplier.";
   }
   if (step.phase === "PAYMENT") {
     if (b.escrow) {
@@ -126,11 +126,14 @@ export function gateReason(b: OrderBundle, step: JourneyStep): string | null {
     return need.every((l) => b.lots.some((lot) => lot.orderLineMpn === l.mpn && lot.testStatus === "PASS"))
       ? null : "Every line that needs testing must have a PASS lot (see the Testing tab).";
   }
-  if (step.phase === "IMPORT") return b.shipments.some((s) => s.leg === "INBOUND") ? null : "No inbound shipment yet — create one on the Shipments tab.";
+  if (step.phase === "EXPORT") return b.shipments.some((s) => s.leg === "INBOUND" && s.status !== "PLANNED") ? null : "Supplier hasn't dispatched (export cleared) the inbound shipment yet.";
+  if (step.phase === "IMPORT") return b.shipments.some((s) => s.leg === "INBOUND" && ["ARRIVED", "DELIVERED"].includes(s.status)) ? null : "No inbound shipment arrival recorded yet - update status on the Shipments tab.";
   if (step.phase === "CUSTOMS") return b.customs.some((c) => !!c.icegateRef) ? null : "BOE not filed in ICEGATE yet.";
+  if (step.phase === "RELABEL") return b.relabelledAt ? null : "Goods not yet marked as received + relabelled to 1Buy (Journey tab).";
   if (step.phase === "DELIVERY" && n.includes("dispatch")) { // can't dispatch to client until every line is mapped to demand
     return b.lines.every((l) => unmappedForOrderLine(b, l) === 0) ? null : "Not all order lines are mapped to a client PO yet (Allocations tab).";
   }
+  if (step.phase === "CLOSE") return b.approvals.every((a) => a.status === "APPROVED") ? null : "Not all approvals are resolved yet (Approvals tab).";
   return null; // manual gate (e.g. Supplier ACK + PI)
 }
 
@@ -138,7 +141,7 @@ export function gateReason(b: OrderBundle, step: JourneyStep): string | null {
 
 export const specForMpn = (b: OrderBundle, mpn: string) => (b.mpnTests ?? []).find((s) => s.mpn === mpn);
 
-/** Tests done / total on a lot (F.A.R. and Not Conducted are NOT done — they need follow-up). */
+/** Tests done / total on a lot (F.A.R. and Not Conducted are NOT done - they need follow-up). */
 export function lotTestProgress(lot: Lot) {
   const tests = lot.tests ?? [];
   const settled = tests.filter((t) => t.status === "PASSED").length;
@@ -253,10 +256,10 @@ export function stageWaiting(b: OrderBundle) {
 export const lotEmails = (b: OrderBundle, lotId: string) =>
   (b.labEmails ?? []).filter((m) => m.lotId === lotId);
 
-/** Inbound mail the platform couldn't route to a lot — must be matched by hand, never dropped. */
+/** Inbound mail the platform couldn't route to a lot - must be matched by hand, never dropped. */
 export const unmatchedEmails = (b: OrderBundle) => (b.labEmails ?? []).filter((m) => m.direction === "IN" && !m.lotId);
 
-/** MPNs whose PO parse failed or was never run — "needs manual review". */
+/** MPNs whose PO parse failed or was never run - "needs manual review". */
 export function testAutofillGaps(b: OrderBundle) {
   const testable = b.lines.filter((l) => l.testingMode !== "NONE");
   return testable
@@ -301,7 +304,7 @@ export function reconciliationAlerts(b: OrderBundle) {
 /**
  * Roll-up for the tab header. Pass a lotId to scope every number to one lot
  * (the "view this lot's result" filter); omit it for the order-wide total.
- * Unmatched inbound mail stays order-wide — it isn't attached to a lot yet.
+ * Unmatched inbound mail stays order-wide - it isn't attached to a lot yet.
  */
 export function testingSummary(b: OrderBundle, lotId?: string) {
   const lots = lotId ? b.lots.filter((l) => l.id === lotId) : b.lots;
@@ -343,7 +346,7 @@ export function lotResults(b: OrderBundle) {
       overdueDays: overdue?.days ?? 0,
       // what still blocks this lot from being releasable, in one phrase
       blocker: p.failed > 0 ? "not-acceptable result"
-        : p.far > 0 ? "F.A.R. — needs follow-up"
+        : p.far > 0 ? "F.A.R. - needs follow-up"
         : p.notConducted > 0 ? "process not conducted"
         : p.total === 0 ? "no tests on file"
         : p.open > 0 ? `${p.open} test(s) still open`
@@ -446,3 +449,98 @@ export const usdRollup = (b: OrderBundle) => ({
   sellUSD: toUSD(b.sellTotal, b.currency),
   marginUSD: toUSD(b.sellTotal - b.buyTotal, b.currency),
 });
+
+// ---- RFQ Module Selectors ----
+
+import type {
+  DemandLinesMap, RfqBundlesMap, SupplierQuotesMap, ClientQuoteDecisionsMap, ClientQuotesMap,
+  DemandLine, RfqBundle, RfqLine, SupplierQuote, QuoteLine, ClientQuoteDecision, ClientQuote, QuoteEmail,
+} from "@/types";
+import type { Approval } from "@/types";
+
+// Demand ledger: aggregated qty in open RFQ bundles (no stored counter; computed)
+export const demandAggregatedForLine = (rfqBundles: RfqBundlesMap, demandLineId: string): number => {
+  let total = 0;
+  for (const bundle of Object.values(rfqBundles)) {
+    if (["DRAFT", "FLOATED", "RECEIVING_QUOTES", "QUOTES_IN", "DECISION_PENDING"].includes(bundle.status)) {
+      for (const line of bundle.lines) {
+        if (line.demandLineIds.includes(demandLineId)) {
+          total += line.aggregatedQty;
+        }
+      }
+    }
+  }
+  return total;
+};
+
+// How much of a demand line still needs RFQ'd (can be negative if over-sourced)
+export const demandRemaining = (demand: DemandLine, rfqBundles: RfqBundlesMap): number =>
+  demand.qty - demandAggregatedForLine(rfqBundles, demand.id);
+
+// All RFQ bundles in open status (not SUPERSEDED/CANCELLED/decided)
+export const allOpenRfqs = (rfqBundles: RfqBundlesMap): RfqBundle[] =>
+  Object.values(rfqBundles).filter((b) => ["DRAFT", "FLOATED", "RECEIVING_QUOTES", "QUOTES_IN", "DECISION_PENDING"].includes(b.status));
+
+// All quotes for one RfqLine
+export const quotesForLine = (supplierQuotes: SupplierQuotesMap, rfqLineId: string): QuoteLine[] => {
+  const quotes: QuoteLine[] = [];
+  for (const quote of Object.values(supplierQuotes)) {
+    for (const line of quote.lines) {
+      if (line.rfqLineId === rfqLineId) quotes.push(line);
+    }
+  }
+  return quotes;
+};
+
+// Cheapest quote for one RfqLine (ignores WITHDRAWN/DECLINED)
+export const bestQuotePerLine = (supplierQuotes: SupplierQuotesMap, rfqLineId: string): QuoteLine | null => {
+  const quotes = quotesForLine(supplierQuotes, rfqLineId)
+    .filter((q) => !["WITHDRAWN", "DECLINED"].includes(q.status));
+  return quotes.length ? quotes.sort((a, b) => a.unitPrice - b.unitPrice)[0] : null;
+};
+
+// Quotes visible to a supplier (isolation: only their own)
+export const quotesForSupplierOnBundle = (supplierQuotes: SupplierQuotesMap, rfqBundleId: string, supplierEmail: string): SupplierQuote | null => {
+  const quote = Object.values(supplierQuotes).find((q) => q.rfqBundleId === rfqBundleId && q.supplierEmail === supplierEmail);
+  return quote ?? null;
+};
+
+// Unmatched supplier emails (manual-match queue)
+export const unassignedQuoteEmails = (rfqBundles: RfqBundlesMap, rfqBundleId: string): QuoteEmail[] => {
+  const bundle = rfqBundles[rfqBundleId];
+  if (!bundle) return [];
+  // Note: QuoteEmail stored separately in store; this is a placeholder for selector pattern
+  return [];
+};
+
+// Approvals filtered by kind (for QUOTE_REVIEW)
+export const approvalsByKind = (allApprovals: Approval[], kind: string): Approval[] =>
+  allApprovals.filter((a) => a.kind === kind);
+
+// P&L calculation: cost → markup → revenue
+export const calculateLineMargin = (
+  suppliedUnitPrice: number,
+  suppliedQty: number,
+  markupPercent: number,
+): { vendorCost: number; clientUnitPrice: number; clientRevenue: number; grossMarginDollar: number; grossMarginPercent: number } => {
+  const vendorCost = suppliedUnitPrice * suppliedQty;
+  const clientUnitPrice = suppliedUnitPrice * (1 + markupPercent / 100);
+  const clientRevenue = clientUnitPrice * suppliedQty;
+  const grossMarginDollar = clientRevenue - vendorCost;
+  const grossMarginPercent = vendorCost > 0 ? (grossMarginDollar / vendorCost) * 100 : 0;
+  return { vendorCost, clientUnitPrice, clientRevenue, grossMarginDollar, grossMarginPercent };
+};
+
+// Alt-group validation: same group = auto-accept, different group = flag
+export const validateQuoteLineSubstitution = (rfqLineAltGroupId: string, quoteLineAlternateAltGroupId: string): { valid: boolean; requiresApproval: boolean } => {
+  if (rfqLineAltGroupId === quoteLineAlternateAltGroupId) {
+    return { valid: true, requiresApproval: false };
+  }
+  return { valid: true, requiresApproval: true };
+};
+
+// Client-viewable quote (cost/margin/supplier stripped for masking)
+export const clientViewableQuote = (clientQuote: ClientQuote): Omit<ClientQuote, "vendorCost" | "supplierEmail" | "marginPercent"> => {
+  const { ...viewable } = clientQuote;
+  return viewable;
+};

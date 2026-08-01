@@ -240,6 +240,7 @@ function OverviewTab({ b, pct, current, onUploadPI }: { b: OrderBundle; pct: num
             <Field label="Sell total (client →)">{money(b.sellTotal, b.currency)}{nonUsd && <span className="ml-1 text-xs text-faint">≈ {usd(toUSD(b.sellTotal, b.currency))}</span>}</Field>
             <Field label="Margin">{money(b.sellTotal - b.buyTotal, b.currency)} · {b.sellTotal > 0 ? Math.round(((b.sellTotal - b.buyTotal) / b.sellTotal) * 100) : 0}%</Field>
             {!!b.relabelCost && <Field label="Relabelling cost (hub)">{money(b.relabelCost, b.currency)} <span className="text-xs text-faint">(landed cost)</span></Field>}
+            <Field label="Relabelled to 1Buy">{b.relabelledAt ? <span className="text-ok">{b.relabelledAt}</span> : <span className="text-faint">not yet</span>}</Field>
             <Field label="Currency">{b.currency} <span className="text-xs text-faint">(USD canonical)</span></Field>
           </Panel>
           <Panel title="Where we are">
@@ -338,12 +339,19 @@ function stepIcon(s: JourneyStep) {
 
 function JourneyTab({ b, id, onAdd }: { b: OrderBundle; id: string; onAdd: () => void }) {
   const advanceStep = useStore((s) => s.advanceStep);
+  const markRelabelled = useStore((s) => s.markRelabelled);
   const current = b.journey.find((s) => s.status === "IN_PROGRESS" || s.status === "BLOCKED");
   const reason = current ? gateReason(b, current) : null;
+  const needsRelabel = current?.phase === "RELABEL" && !b.relabelledAt;
   return (
     <Panel title="Journey — manual state machine"
-      actions={<div className="flex gap-2"><Button variant="outline" onClick={onAdd}><Plus className="h-4 w-4" /> Add step</Button><Button onClick={() => advanceStep(id)} disabled={!current || !!reason}>Mark current done</Button></div>}>
+      actions={<div className="flex gap-2">
+        <Button variant="outline" onClick={onAdd}><Plus className="h-4 w-4" /> Add step</Button>
+        {needsRelabel && <Button variant="outline" onClick={() => markRelabelled(id)}>Mark relabelled</Button>}
+        <Button onClick={() => advanceStep(id)} disabled={!current || !!reason}>Mark current done</Button>
+      </div>}>
       {reason && <div className="mb-3 inline-flex items-center gap-1.5 rounded-lg border border-[color-mix(in_srgb,var(--warn)_40%,transparent)] bg-warn-bg px-3 py-2 text-xs text-warn"><Lock className="h-3.5 w-3.5" /> Gate blocked — {reason}</div>}
+      {b.relabelledAt && <div className="mb-3 inline-flex items-center gap-1.5 rounded-lg border border-[color-mix(in_srgb,var(--ok)_40%,transparent)] bg-ok-bg px-3 py-2 text-xs text-ok"><Check className="h-3.5 w-3.5" /> Relabelled to 1Buy on {b.relabelledAt}</div>}
       <ol className="space-y-1">
         {b.journey.map((s) => {
           const isCurrent = s.id === current?.id;

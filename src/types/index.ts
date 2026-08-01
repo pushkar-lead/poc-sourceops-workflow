@@ -686,4 +686,169 @@ export interface OrderBundle extends Order {
   approvals: Approval[];
   events: OrderEvent[];
   einvoice?: EInvoice;
+  relabelledAt?: string; // set when goods are physically received + relabelled to the masking entity at the hub — gates RELABEL
 }
+
+// ---- RFQ Module Types ----
+
+export type RfqBundleStatus = "DRAFT" | "FLOATED" | "RECEIVING_QUOTES" | "QUOTES_IN" | "DECISION_PENDING" | "DECIDED" | "CLIENT_QUOTE_SENT" | "CLIENT_CONFIRMED" | "SUPERSEDED" | "CANCELLED";
+export type SupplierQuoteStatus = "SUBMITTED" | "REJECTED" | "WITHDRAWN" | "ACCEPTED";
+export type QuoteLineStatus = "ACTIVE" | "COUNTER_PENDING" | "COUNTER_RESPONSE" | "ACCEPTED" | "WITHDRAWN" | "DECLINED";
+export type ClientQuoteDecisionStatus = "DRAFT" | "PENDING_APPROVAL" | "APPROVED" | "REJECTED";
+export type ClientQuoteStatus = "PENDING" | "ACCEPTED" | "EXPIRED" | "CHANGE_REQUESTED" | "WITHDRAWN";
+export type QuoteEmailStatus = "UNMATCHED" | "MATCHED" | "ESCALATED";
+
+export interface DemandLine {
+  id: string;
+  mpn: string;
+  qty: number;
+  targetPrice: number;
+  currency: string;
+  requiredByDate: string;
+  source: "email" | "manual" | "portal";
+  clientPoId?: string;
+  clientLineId?: string;
+  createdAt: string;
+}
+
+export interface RfqLine {
+  id: string;
+  rfqBundleId: string;
+  demandLineIds: string[];
+  mpn: string;
+  alternateGroupId: string;
+  aggregatedQty: number;
+  targetPrice: number;
+  currency: string;
+  clientPoId?: string;
+  clientLineIds?: string[];
+}
+
+export interface RfqBundle {
+  id: string;
+  lines: RfqLine[];
+  invites: SupplierInvite[];
+  status: RfqBundleStatus;
+  deadline: string;
+  dateToleranceDays: number;
+  createdAt: string;
+}
+
+export interface SupplierQuestion {
+  id: string;
+  question: string;
+  askedAt: string;
+  answer?: string;
+  answeredAt?: string;
+}
+
+export interface SupplierInvite {
+  id: string;
+  rfqBundleId: string;
+  supplierName: string;
+  supplierEmail: string;
+  status: "PENDING" | "SENT" | "VIEWED" | "QUOTED" | "DECLINED";
+  portalToken: string;
+  expiresAt: string;
+  sentAt?: string;
+  viewedAt?: string;
+  lastError?: string;
+  questions?: SupplierQuestion[];
+}
+
+export interface SupplierQuote {
+  id: string;
+  rfqBundleId: string;
+  supplierEmail: string;
+  lines: QuoteLine[];
+  status: SupplierQuoteStatus;
+  submittedAt: string;
+  sellerPiNo?: string; // the supplier's own proforma invoice no — required before we cut our PO against it
+  sellerPiReceivedAt?: string;
+}
+
+export interface QuoteLine {
+  id: string;
+  rfqLineId: string;
+  supplierEmail: string;
+  quotedMpn: string;
+  stockQty: number;
+  unitPrice: number;
+  currency: string;
+  leadTimeDays: number;
+  leadTimeUnit: "days" | "weeks" | "months";
+  incoterm: string;
+  location: string;
+  packaging: string;
+  validityDays: number;
+  moq: number;
+  spq: number;
+  dateCode: string;
+  termsConditions: string[];
+  stockSource: string;
+  paymentTerms: string;
+  status: QuoteLineStatus;
+  requiresApproval?: boolean;
+}
+
+export interface QuoteEmail {
+  id: string;
+  rfqBundleId: string;
+  supplierEmail: string;
+  rawEmail: string;
+  parsed: { lines: Partial<QuoteLine>[] };
+  matchedSupplierQuoteId?: string;
+  status: QuoteEmailStatus;
+  escalationNote?: string;
+  createdAt: string;
+}
+
+export interface ClientQuoteDecision {
+  id: string;
+  rfqBundleId: string;
+  selectedQuoteLines: { rfqLineId: string; quoteLineId: string }[];
+  allocations: { rfqLineId: string; clientPoId: string; qty: number; unitPrice: number }[]; // multi-buyer split
+  markupPercent: number;
+  status: ClientQuoteDecisionStatus;
+  approvalId?: string;
+  sentAt?: string;
+  decidedBy?: string;
+  decidedAt?: string;
+  rejectionReason?: string;
+  createdAt: string;
+}
+
+export interface ClientQuote {
+  id: string;
+  rfqBundleId: string;
+  clientQuoteDecisionId: string;
+  clientPoId: string;
+  piNo: string; // our proforma invoice no — the formal document the buyer's PO is raised against
+  clientName: string;
+  clientEmail: string;
+  token: string;
+  lines: { rfqLineId: string; mpn: string; qty: number; unitPrice: number }[];
+  totalPrice: number;
+  expiresAt: string;
+  status: ClientQuoteStatus;
+  createdAt: string;
+  acceptedAt?: string;
+  buyerNotes?: string; // buyer's own note when requesting changes (distinct from a send failure)
+  lastError?: string;
+}
+
+export interface QuoteAgentNote {
+  id: string;
+  quoteLineId: string;
+  agentName: string;
+  note: string;
+  clarificationType: "AMBIGUITY" | "MOQ_ISSUE" | "LEAD_TIME" | "PRICE";
+  resolution: string;
+  createdAt: string;
+}
+
+export type DemandLinesMap = Record<string, DemandLine>;
+export type RfqBundlesMap = Record<string, RfqBundle>;
+export type SupplierQuotesMap = Record<string, SupplierQuote>;
+export type ClientQuoteDecisionsMap = Record<string, ClientQuoteDecision>;
+export type ClientQuotesMap = Record<string, ClientQuote>;

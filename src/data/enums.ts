@@ -41,7 +41,7 @@ export function statusTone(s?: string): Tone {
 }
 
 export function prettyStatus(s?: string) {
-  if (!s) return "—";
+  if (!s) return "-";
   if (s.toUpperCase() === "FAR") return "F.A.R.";
   return s.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
 }
@@ -50,6 +50,14 @@ export function prettyStatus(s?: string) {
 export const NAV_GROUPS = [
   { group: null, items: [
     { href: "/fulfilment", label: "Dashboard", icon: "LayoutDashboard" },
+  ] },
+  { group: "RFQ Management", items: [
+    { href: "/fulfilment/client-rfq", label: "Client RFQs", icon: "Mail" },
+    { href: "/fulfilment/rfq-aggregation", label: "RFQ Flow", icon: "SendHorizontal" },
+    { href: "/fulfilment/rfq-bundles", label: "Supplier RFQs", icon: "FileText" },
+    { href: "/fulfilment/quote-matching-inbox", label: "Quote Inbox", icon: "PlusCircle" },
+    { href: "/fulfilment/quote-approvals", label: "Quote Approvals", icon: "CheckCircle2" },
+    { href: "/fulfilment/client-quotes", label: "Client Quotes", icon: "DollarSign" },
   ] },
   { group: "Create", items: [
     { href: "/fulfilment/client-pos", label: "Client POs", icon: "FileText" },
@@ -68,6 +76,7 @@ export const NAV_GROUPS = [
     { href: "/fulfilment/escrow", label: "Escrow", icon: "Landmark" },
   ] },
   { group: "Reference", items: [
+    { href: "/fulfilment/directory", label: "Directory", icon: "Users" },
     { href: "/fulfilment/integrations", label: "Integrations", icon: "Webhook" },
     { href: "/fulfilment/guide", label: "Guide", icon: "BookOpen" },
   ] },
@@ -90,10 +99,10 @@ export const DELIVERY_TERMS = ["Test Report Along with Shipment", "Ex-works pick
 export const TEST_FAILURE_BEARERS = ["SUPPLIER", "1BUY", "CLIENT"] as const;
 export const CREDIT_DAYS = [30, 60, 90] as const;
 
-// Standard supplier-PO terms & conditions — tickboxes; `on` = pre-checked defaults (the usual ones).
+// Standard supplier-PO terms & conditions - tickboxes; `on` = pre-checked defaults (the usual ones).
 export const STANDARD_TNC: { id: string; label: string; on: boolean }[] = [
   { id: "genuine", label: "Goods must be new, genuine & factory-sealed (no refurbished/remarked)", on: true },
-  { id: "traceable", label: "Full traceability — Certificate of Conformance / manufacturer lot", on: true },
+  { id: "traceable", label: "Full traceability - Certificate of Conformance / manufacturer lot", on: true },
   { id: "datecode", label: "Date code as specified per line; no mixed date codes without approval", on: true },
   { id: "testreport", label: "Test report / CoA supplied along with the shipment", on: true },
   { id: "failbearer", label: "Supplier bears cost on test FAIL (return + re-test)", on: true },
@@ -101,6 +110,63 @@ export const STANDARD_TNC: { id: string; label: string; on: boolean }[] = [
   { id: "nopartial", label: "No partial shipment without prior written approval", on: false },
   { id: "rohs", label: "RoHS / REACH compliant; MSD-packed where applicable", on: false },
 ];
+
+// ---- RFQ Module Enums ----
+
+export const RFQ_BUNDLE_STATUSES = ["DRAFT", "FLOATED", "RECEIVING_QUOTES", "QUOTES_IN", "DECISION_PENDING", "DECIDED", "CLIENT_QUOTE_SENT", "CLIENT_CONFIRMED", "SUPERSEDED", "CANCELLED"] as const;
+export const SUPPLIER_QUOTE_STATUSES = ["SUBMITTED", "REJECTED", "WITHDRAWN", "ACCEPTED"] as const;
+export const QUOTE_LINE_STATUSES = ["ACTIVE", "COUNTER_PENDING", "COUNTER_RESPONSE", "ACCEPTED", "WITHDRAWN", "DECLINED"] as const;
+export const CLIENT_QUOTE_DECISION_STATUSES = ["DRAFT", "PENDING_APPROVAL", "APPROVED", "REJECTED"] as const;
+export const CLIENT_QUOTE_STATUSES = ["PENDING", "ACCEPTED", "EXPIRED", "CHANGE_REQUESTED", "WITHDRAWN"] as const;
+export const QUOTE_EMAIL_STATUSES = ["UNMATCHED", "MATCHED", "ESCALATED"] as const;
+
+export const SUPPLIER_INVITE_STATUSES = ["PENDING", "SENT", "VIEWED", "QUOTED", "DECLINED"] as const;
+
+// Email templates for RFQ module
+export const RFQ_EMAIL_TEMPLATES = {
+  RFQ_BUNDLE_INVITE: {
+    id: "RFQ_BUNDLE_INVITE",
+    subject: (bundleId: string, lines: number) => `Bundle RFQ - ${lines} component(s) · ${bundleId}`,
+    body: (bundle: { id: string; lines: { mpn: string; aggregatedQty: number; targetPrice: number }[] }, supplierName: string, portalLink: string, deadline: string) => `
+Dear ${supplierName},
+
+We are pleased to request your quotation for the components listed below.
+
+RFQ Bundle: ${bundle.id}
+Deadline: ${deadline}
+
+Table Columns:
+MPN | Mfr | Desc | Qty | Target | Lead | Type | Pkg | DateCode | Inco | MOQ | SPQ | Pay
+
+${bundle.lines.map((l) => `${l.mpn} | | | ${l.aggregatedQty} | ${l.targetPrice} | | | | | | |`).join("\n")}
+
+Please submit your quote via the supplier portal: ${portalLink}
+
+Best regards,
+Sharpbuy (Sourcing Team)
+    `.trim(),
+  },
+};
+
+export const CLIENT_QUOTE_TEMPLATES = {
+  QUOTE_SEND: {
+    id: "QUOTE_SEND",
+    subject: (clientName: string, bundleId: string) => `Quote for your RFQ - Bundle ${bundleId}`,
+    body: (clientName: string, total: number, currency: string, expiryDate: string, acceptLink: string) => `
+Dear ${clientName},
+
+Thank you for your RFQ. We are pleased to provide you with our quotation below.
+
+Total: ${currency} ${total.toFixed(2)}
+Quote Expiry: ${expiryDate}
+
+Please review the attached quotation. To accept this quote, please click here: ${acceptLink}
+
+Best regards,
+Sharpbuy (Sales Team)
+    `.trim(),
+  },
+};
 
 // ---- WHL testing reference data ----
 // The processes a WHL report breaks its conclusion down by (each independently
@@ -256,7 +322,7 @@ export const STAGE_OWNER_LABEL: Record<StageOwner, string> = {
 
 // Confidentiality: WHL reports carry NDA language — storage/viewing stays internal + access-logged.
 export const WHL_CONFIDENTIALITY =
-  "CONFIDENTIAL — issued to Sharpbuy Global Solutions under NDA. Internal use only; no redistribution to the client or supplier without WHL's written consent.";
+  "CONFIDENTIAL - issued to Sharpbuy Global Solutions under NDA. Internal use only; no redistribution to the client or supplier without WHL's written consent.";
 
 // ---- WHL email templates ----------------------------------------------------------
 // Every outbound mail starts from a template with the subject AND body pre-filled from
@@ -284,7 +350,7 @@ export interface WhlMailTemplate {
 
 const refLine = (c: WhlMailCtx) => [
   c.mpn && `· MPN: ${c.mpn}${c.dateCode ? ` (date code ${c.dateCode})` : ""}`,
-  c.lotCode && `· Lot: ${c.lotCode}${c.qty ? ` — qty ${c.qty}${c.sampleQty ? `, sample ${c.sampleQty}` : ""}` : ""}`,
+  c.lotCode && `· Lot: ${c.lotCode}${c.qty ? ` - qty ${c.qty}${c.sampleQty ? `, sample ${c.sampleQty}` : ""}` : ""}`,
   c.workOrderNo && `· Work order: ${c.workOrderNo}`,
   c.reportNo && `· Report: ${c.reportNo}`,
   c.clientPoNo && `· Client PO: ${c.clientPoNo}`,
@@ -293,13 +359,13 @@ const refLine = (c: WhlMailCtx) => [
 
 const sign = (c: WhlMailCtx) => `Thanks,\nSourcing Ops\n${c.entity}`;
 const head = (c: WhlMailCtx) => `Hi WHL team,\n\nReference:\n${refLine(c)}\n\n`;
-const tag = (c: WhlMailCtx) => `WO ${c.workOrderNo ?? "(pending)"} / Lot ${c.lotCode ?? "—"} / ${c.mpn ?? "—"}`;
+const tag = (c: WhlMailCtx) => `WO ${c.workOrderNo ?? "(pending)"} / Lot ${c.lotCode ?? "-"} / ${c.mpn ?? "-"}`;
 
 export const WHL_EMAIL_TEMPLATES: WhlMailTemplate[] = [
   {
     id: "STATUS_REQUEST", label: "Status request", hint: "Where is this lot? (also used by “Request Update”)",
-    subject: (c) => `Status request — ${tag(c)}`,
-    body: (c) => `${head(c)}Could you share the current status of the above lot — which processes are complete, which are in progress, and the expected date for the report?\n\nIf the report is already issued, please attach the latest revision.\n\n${sign(c)}`,
+    subject: (c) => `Status request - ${tag(c)}`,
+    body: (c) => `${head(c)}Could you share the current status of the above lot - which processes are complete, which are in progress, and the expected date for the report?\n\nIf the report is already issued, please attach the latest revision.\n\n${sign(c)}`,
   },
   {
     id: "INVOICE_REQUEST", label: "Invoice request", hint: "Ask WHL for the testing invoice so payment can be raised",
@@ -308,41 +374,41 @@ export const WHL_EMAIL_TEMPLATES: WhlMailTemplate[] = [
   },
   {
     id: "REPORT_REQUEST", label: "Report / latest revision", hint: "Ask for the PDF or the newest revision",
-    subject: (c) => `Report request — ${tag(c)}`,
+    subject: (c) => `Report request - ${tag(c)}`,
     body: (c) => `${head(c)}Please send the test report for this lot as a PDF. If a revision has been issued since${c.reportNo ? ` ${c.reportNo}` : ""}, share the current version and confirm which report number supersedes which.\n\n${sign(c)}`,
   },
   {
     id: "RETEST_REQUEST", label: "Re-test request (result disputed)", hint: "Supplier disputes a Not-Acceptable result",
-    subject: (c) => `Re-test request — ${tag(c)}`,
+    subject: (c) => `Re-test request - ${tag(c)}`,
     body: (c) => `${head(c)}The supplier has disputed the result recorded in${c.reportNo ? ` report ${c.reportNo}` : " your report"} for this lot.\n\nCould you re-test the affected units and issue a revised report? Please confirm:\n1. the units to be re-tested and the method used,\n2. the additional TAT, and\n3. whether any re-test cost applies.\n\n${sign(c)}`,
   },
   {
     id: "FAR_FOLLOWUP", label: "F.A.R. follow-up", hint: "A process came back Further Analysis Recommended",
-    subject: (c) => `F.A.R. follow-up — ${tag(c)}`,
+    subject: (c) => `F.A.R. follow-up - ${tag(c)}`,
     body: (c) => `${head(c)}${c.reportNo ? `Report ${c.reportNo}` : "Your report"} is Acceptable overall, but a process is flagged F.A.R. (Further Analysis Recommended).\n\nBefore we release this lot, please confirm:\n1. which units and which process the F.A.R. applies to,\n2. what further analysis you recommend, with cost and TAT, and\n3. whether the lot can be accepted as-is with a documented caveat.\n\n${sign(c)}`,
   },
   {
     id: "TAT_ESCALATION", label: "TAT escalation", hint: "Past the quoted turnaround / unanswered chase",
-    subject: (c) => `Escalation — TAT overdue — ${tag(c)}`,
+    subject: (c) => `Escalation - TAT overdue - ${tag(c)}`,
     body: (c) => `${head(c)}This lot is past the quoted turnaround and our earlier request is still unanswered. The order is held on this result.\n\nPlease confirm today: current stage, blocker, and a committed report date. If the lab site is the constraint, let us know whether the balance testing can be moved.\n\n${sign(c)}`,
   },
   {
     id: "PO_RECONCILE", label: "Reference mismatch", hint: "Report shows “PO Unknown” or the wrong reference",
-    subject: (c) => `Reference correction — ${tag(c)}`,
-    body: (c) => `${head(c)}The report we received does not carry our reference correctly${c.clientPoNo ? ` — it should read Client P/O ${c.clientPoNo}` : ""}.\n\nPlease re-issue with the correct Client P/O, MPN and lot code so the report reconciles against our PO on file.\n\n${sign(c)}`,
+    subject: (c) => `Reference correction - ${tag(c)}`,
+    body: (c) => `${head(c)}The report we received does not carry our reference correctly${c.clientPoNo ? ` - it should read Client P/O ${c.clientPoNo}` : ""}.\n\nPlease re-issue with the correct Client P/O, MPN and lot code so the report reconciles against our PO on file.\n\n${sign(c)}`,
   },
   {
     id: "SAMPLE_QUERY", label: "Sample / test-plan query", hint: "Confirm sample size or a Not-Conducted process",
-    subject: (c) => `Test plan query — ${tag(c)}`,
-    body: (c) => `${head(c)}Could you confirm the test plan applied to this lot — sample size drawn, standard followed, and the reason any process was recorded as Not Conducted?\n\nOur PO requires the full screen, so please advise if anything is outstanding.\n\n${sign(c)}`,
+    subject: (c) => `Test plan query - ${tag(c)}`,
+    body: (c) => `${head(c)}Could you confirm the test plan applied to this lot - sample size drawn, standard followed, and the reason any process was recorded as Not Conducted?\n\nOur PO requires the full screen, so please advise if anything is outstanding.\n\n${sign(c)}`,
   },
   {
     id: "NEW_SUBMISSION", label: "New submission / booking", hint: "Tell WHL a lot is on its way",
-    subject: (c) => `Incoming submission — ${c.mpn ?? "part"} / Lot ${c.lotCode ?? "—"}`,
+    subject: (c) => `Incoming submission - ${c.mpn ?? "part"} / Lot ${c.lotCode ?? "-"}`,
     body: (c) => `${head(c)}We are shipping the above lot to you for testing per our PO test plan.\n\nPlease confirm receipt, the work-order number raised against it, and the expected TAT.\n\n${sign(c)}`,
   },
   {
-    id: "FREE_TEXT", label: "Blank (free text)", hint: "Context block only — write your own ask",
+    id: "FREE_TEXT", label: "Blank (free text)", hint: "Context block only - write your own ask",
     subject: (c) => `${tag(c)}`,
     body: (c) => `${head(c)}\n\n${sign(c)}`,
   },
@@ -350,7 +416,7 @@ export const WHL_EMAIL_TEMPLATES: WhlMailTemplate[] = [
 
 export const whlTemplate = (id: string) => WHL_EMAIL_TEMPLATES.find((t) => t.id === id) ?? WHL_EMAIL_TEMPLATES[0];
 
-// ---- "result is in — who do we tell" templates ---------------------------------------
+// ---- "result is in - who do we tell" templates ---------------------------------------
 // Masked trade: the supplier mail never names the buyer, the buyer mail never names the
 // supplier. Both go out from the masking entity. Escrow gets the release-trigger evidence.
 export interface NotifyCtx {
@@ -399,7 +465,7 @@ const verdictWord = (c: NotifyCtx) =>
 
 const lotRef = (c: NotifyCtx) => [
   `· MPN: ${c.mpn}${c.dateCode ? ` (date code ${c.dateCode})` : ""}`,
-  `· Lot: ${c.lotCode} — qty ${c.qty}${c.sampleQty ? `, sample ${c.sampleQty}` : ""}`,
+  `· Lot: ${c.lotCode} - qty ${c.qty}${c.sampleQty ? `, sample ${c.sampleQty}` : ""}`,
   c.reportNo && `· Test report: ${c.reportNo}${c.reportDate ? ` dated ${c.reportDate}` : ""}`,
   c.conclusion && `· Conclusion: ${verdictWord(c)}`,
 ].filter(Boolean).join("\n");
@@ -409,41 +475,41 @@ export const NOTIFY_TEMPLATES: NotifyTemplate[] = [
     party: "SUPPLIER", label: "Notify supplier", hint: "Result + report to the supplier (buyer stays masked)",
     to: () => "quality@supplier.example",
     masking: "The buyer's identity, client PO and sell prices are never included.",
-    subject: (c) => `Test result — ${c.mpn} / Lot ${c.lotCode} — ${verdictWord(c)}${c.supplierPoNo ? ` (${c.supplierPoNo})` : ""}`,
+    subject: (c) => `Test result - ${c.mpn} / Lot ${c.lotCode} - ${verdictWord(c)}${c.supplierPoNo ? ` (${c.supplierPoNo})` : ""}`,
     body: (c) => `Dear supplier,\n\nThe independent test on the lot supplied against ${c.supplierPoNo ?? "our PO"} is complete.\n\n${lotRef(c)}\n\n${
       c.conclusion === "ACCEPTABLE"
         ? `The lot is accepted${c.anyFar ? ", subject to closing out the process flagged for further analysis" : ""}. We are proceeding with onward logistics and payment per the agreed terms.`
         : `The lot is NOT accepted. Per the PO, the cost of test failure and return sits with the supplier. Please confirm within 2 business days whether you will (a) replace the lot with fully traceable stock, or (b) accept return and refund.`
-    }\n\nThe attached report is issued to us by White Horse Laboratories under NDA and is shared with you solely to evidence this lot's disposition — please do not redistribute it further.\n\nRegards,\nSourcing Ops\n${c.entity}`,
+    }\n\nThe attached report is issued to us by White Horse Laboratories under NDA and is shared with you solely to evidence this lot's disposition - please do not redistribute it further.\n\nRegards,\nSourcing Ops\n${c.entity}`,
   },
   {
     party: "BUYER", label: "Notify buyer / client", hint: "Result + report to the client (supplier stays masked)",
     to: () => "procurement@client.example",
     masking: "The supplier's identity, buy prices and inbound AWB are never included.",
-    subject: (c) => `${c.orderNo} — test result for ${c.mpn} / Lot ${c.lotCode} — ${verdictWord(c)}`,
+    subject: (c) => `${c.orderNo} - test result for ${c.mpn} / Lot ${c.lotCode} - ${verdictWord(c)}`,
     body: (c) => `Dear customer,\n\nIndependent testing on your order${c.clientPoNo ? ` against ${c.clientPoNo}` : ""} is complete.\n\n${lotRef(c)}\n${c.lab ? `· Laboratory: ${c.lab}\n` : ""}\n${
       c.conclusion === "ACCEPTABLE"
-        ? `The lot has passed the agreed screen${c.anyFar ? ", with one process flagged for further analysis — we are closing that out with the laboratory before dispatch" : " and is cleared for dispatch"}. We will confirm the delivery schedule shortly.`
+        ? `The lot has passed the agreed screen${c.anyFar ? ", with one process flagged for further analysis - we are closing that out with the laboratory before dispatch" : " and is cleared for dispatch"}. We will confirm the delivery schedule shortly.`
         : `The lot did not pass the agreed screen and will not be dispatched to you. We are sourcing replacement stock and will confirm the revised schedule; your funds remain protected under the agreed payment terms.`
-    }\n\nThe laboratory report is attached for your records. It is issued under NDA — kindly keep it internal to your organisation.\n\nRegards,\nSourcing Ops\n${c.entity}`,
+    }\n\nThe laboratory report is attached for your records. It is issued under NDA - kindly keep it internal to your organisation.\n\nRegards,\nSourcing Ops\n${c.entity}`,
   },
   {
     party: "ESCROW", label: "Notify escrow provider", hint: "Release-trigger evidence to HKIN",
     to: () => "ops@hkin.example",
-    masking: "Sent by the masking entity only — counterparties are referenced by escrow token.",
-    subject: (c) => `Escrow ${c.escrowRef ?? "(ref)"} — release trigger evidence — Lot ${c.lotCode} ${verdictWord(c)}`,
+    masking: "Sent by the masking entity only - counterparties are referenced by escrow token.",
+    subject: (c) => `Escrow ${c.escrowRef ?? "(ref)"} - release trigger evidence - Lot ${c.lotCode} ${verdictWord(c)}`,
     body: (c) => `Dear HKIN team,\n\nRe escrow ${c.escrowRef ?? "(ref)"} for ${c.orderNo}:\n\n${lotRef(c)}\n\n${
       c.conclusion === "ACCEPTABLE"
         ? `The release trigger (independent lab PASS) is satisfied for this lot.${c.anyFar ? " Note one process is flagged F.A.R.; we are proceeding on the overall Acceptable conclusion." : ""} Please treat the attached report as the supporting evidence for the tranche release${c.releasable ? ` of up to ${c.currency ?? ""} ${c.releasable}` : ""}.`
-        : `The lab result is ${verdictWord(c)} — the release trigger is NOT satisfied. Please hold the funds; a refund instruction may follow once the return is agreed with the seller.`
+        : `The lab result is ${verdictWord(c)} - the release trigger is NOT satisfied. Please hold the funds; a refund instruction may follow once the return is agreed with the seller.`
     }\n\nRegards,\nSourcing Ops\n${c.entity}`,
   },
   {
     party: "WHL", label: "Acknowledge to WHL", hint: "Confirm receipt of the report to the lab",
     to: () => WHL_CONTACT,
-    subject: (c) => `Report received — ${c.reportNo ?? "(report)"} / WO ${c.workOrderNo ?? "—"} / Lot ${c.lotCode}`,
-    body: (c) => `Hi WHL team,\n\nThank you — report ${c.reportNo ?? ""} for the lot below is received and logged.\n\n${lotRef(c)}\n\n${
-      c.anyFar ? "One process is flagged F.A.R. — we will revert separately on the further analysis.\n\n" : ""
+    subject: (c) => `Report received - ${c.reportNo ?? "(report)"} / WO ${c.workOrderNo ?? "-"} / Lot ${c.lotCode}`,
+    body: (c) => `Hi WHL team,\n\nThank you - report ${c.reportNo ?? ""} for the lot below is received and logged.\n\n${lotRef(c)}\n\n${
+      c.anyFar ? "One process is flagged F.A.R. - we will revert separately on the further analysis.\n\n" : ""
     }Please retain the samples until we confirm disposition.\n\nThanks,\nSourcing Ops\n${c.entity}`,
   },
   {
@@ -498,7 +564,7 @@ const lotLine = (l: NotifyDigestLot, i: number) => {
     : l.conclusion === "SUSPECT_COUNTERFEIT" ? "Suspect Counterfeit"
     : "result pending";
   return `${i + 1}. ${l.mpn}${l.dateCode ? ` (DC ${l.dateCode})` : ""} · Lot ${l.lotCode} · qty ${l.qty}`
-    + `${l.reportNo ? ` · report ${l.reportNo}${l.reportDate ? ` (${l.reportDate})` : ""}` : ""} — ${verdict}`;
+    + `${l.reportNo ? ` · report ${l.reportNo}${l.reportDate ? ` (${l.reportDate})` : ""}` : ""} - ${verdict}`;
 };
 
 const split = (lots: NotifyDigestLot[]) => ({
@@ -514,7 +580,7 @@ export function notifyDigest(party: NotifyParty, c: NotifyDigestCtx): { subject:
   const n = c.lots.length;
   const list = c.lots.map(lotLine).join("\n");
   const g = split(c.lots);
-  const nda = "The attached report(s) are issued to us by White Horse Laboratories under NDA and are shared solely to evidence these lots' disposition — please do not redistribute them further.";
+  const nda = "The attached report(s) are issued to us by White Horse Laboratories under NDA and are shared solely to evidence these lots' disposition - please do not redistribute them further.";
   const sign = `Regards,\nSourcing Ops\n${c.entity}`;
   const mixed = [
     g.ok.length ? `Accepted: ${codes(g.ok)}.` : "",
@@ -526,24 +592,24 @@ export function notifyDigest(party: NotifyParty, c: NotifyDigestCtx): { subject:
   switch (party) {
     case "SUPPLIER":
       return {
-        subject: `Test results — ${n} lot(s) against ${c.supplierPoNo ?? "our PO"}${g.bad.length ? ` — ${g.bad.length} not accepted` : ""}`,
+        subject: `Test results - ${n} lot(s) against ${c.supplierPoNo ?? "our PO"}${g.bad.length ? ` - ${g.bad.length} not accepted` : ""}`,
         body: `Dear supplier,\n\nIndependent testing is complete on the following lot(s) supplied against ${c.supplierPoNo ?? "our PO"}:\n\n${list}\n\n${mixed}\n\n${
           g.bad.length ? "For the lots not accepted, the PO places the cost of test failure and return with the supplier. Please confirm within 2 business days whether you will replace with fully traceable stock, or accept return and refund.\n\n" : ""
         }${g.ok.length + g.far.length ? "For the accepted lots we are proceeding with onward logistics and payment per the agreed terms.\n\n" : ""}${nda}\n\n${sign}`,
       };
     case "BUYER":
       return {
-        subject: `${c.orderNo} — test results for ${n} lot(s)${c.clientPoNo ? ` (${c.clientPoNo})` : ""}`,
+        subject: `${c.orderNo} - test results for ${n} lot(s)${c.clientPoNo ? ` (${c.clientPoNo})` : ""}`,
         body: `Dear customer,\n\nIndependent testing on your order${c.clientPoNo ? ` against ${c.clientPoNo}` : ""} is complete for the following lot(s):\n\n${list}\n\n${mixed}\n\n${
           g.ok.length + g.far.length ? "The accepted lots are cleared for dispatch and we will confirm the delivery schedule shortly.\n\n" : ""
-        }${g.bad.length ? "The lots not accepted will not be dispatched to you. We are sourcing replacement stock and will confirm the revised schedule; your funds remain protected under the agreed payment terms.\n\n" : ""}The laboratory report(s) are attached for your records. They are issued under NDA — kindly keep them internal to your organisation.\n\n${sign}`,
+        }${g.bad.length ? "The lots not accepted will not be dispatched to you. We are sourcing replacement stock and will confirm the revised schedule; your funds remain protected under the agreed payment terms.\n\n" : ""}The laboratory report(s) are attached for your records. They are issued under NDA - kindly keep them internal to your organisation.\n\n${sign}`,
       };
     case "ESCROW":
       return {
-        subject: `Escrow ${c.escrowRef ?? "(ref)"} — release trigger evidence — ${n} lot(s)`,
+        subject: `Escrow ${c.escrowRef ?? "(ref)"} - release trigger evidence - ${n} lot(s)`,
         body: `Dear HKIN team,\n\nRe escrow ${c.escrowRef ?? "(ref)"} for ${c.orderNo}, the independent lab results for the following lot(s):\n\n${list}\n\n${mixed}\n\n${
           g.ok.length + g.far.length ? `The release trigger (independent lab PASS) is satisfied for ${codes([...g.ok, ...g.far])}. Please treat the attached report(s) as supporting evidence for the tranche release${c.releasable ? ` of up to ${c.currency ?? ""} ${c.releasable}` : ""}.\n\n` : ""
-        }${g.bad.length ? `The trigger is NOT satisfied for ${codes(g.bad)} — please hold those funds; a refund instruction may follow once the return is agreed with the seller.\n\n` : ""}${sign}`,
+        }${g.bad.length ? `The trigger is NOT satisfied for ${codes(g.bad)} - please hold those funds; a refund instruction may follow once the return is agreed with the seller.\n\n` : ""}${sign}`,
       };
     case "FINANCE": {
       // a payment run: one mail, several lab invoices, one total to release
@@ -568,15 +634,15 @@ export function notifyDigest(party: NotifyParty, c: NotifyDigestCtx): { subject:
     case "WHL":
     default:
       return {
-        subject: `Reports received — ${n} lot(s) / ${c.orderNo}`,
-        body: `Hi WHL team,\n\nThank you — the following reports are received and logged:\n\n${list}\n\n${
+        subject: `Reports received - ${n} lot(s) / ${c.orderNo}`,
+        body: `Hi WHL team,\n\nThank you - the following reports are received and logged:\n\n${list}\n\n${
           g.far.length ? `We will revert separately on the further analysis for ${codes(g.far)}.\n\n` : ""
         }Please retain the samples until we confirm disposition.\n\nThanks,\nSourcing Ops\n${c.entity}`,
       };
   }
 }
 
-// Access control — only these personas may override auto-filled tests or email WHL on our behalf.
+// Access control - only these personas may override auto-filled tests or email WHL on our behalf.
 export const TEST_EDIT_ROLES: Role[] = ["SC", "Mgmt"];
 export const LAB_EMAIL_ROLES: Role[] = ["SC", "Mgmt"];
 
